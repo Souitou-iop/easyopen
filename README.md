@@ -1,145 +1,365 @@
 <p align="center">
-  <img src="web/icons/icon-512.png" alt="EasyOpen" width="160" />
+  <img src="docs/assets/easyopen-icon.png" alt="EasyOpen 图标" width="160" />
 </p>
 
 <h1 align="center">EasyOpen</h1>
 
 <p align="center">
-  <strong>面向 YILA 开门器的本地蓝牙开门工具</strong>
+  面向 YILA 开门器的本地蓝牙开门工具
 </p>
 
 <p align="center">
-  <a href="https://creativecommons.org/licenses/by-nc/4.0/"><img src="https://img.shields.io/badge/License-CC%20BY--NC%204.0-blue.svg" alt="License CC BY-NC 4.0" /></a>
-  <a href="https://developer.android.com/"><img src="https://img.shields.io/badge/Android-13.0%2B-3DDC84.svg" alt="Android 13.0+" /></a>
-  <a href="https://kotlinlang.org/"><img src="https://img.shields.io/badge/Kotlin-2.3.21-7F52FF.svg" alt="Kotlin 2.3.21" /></a>
-  <a href="https://developer.mozilla.org/docs/Web/API/Web_Bluetooth_API"><img src="https://img.shields.io/badge/Web-Bluetooth-0F172A.svg" alt="Web Bluetooth" /></a>
+  <a href="https://github.com/Souitou-iop/easyopen/actions"><img src="https://img.shields.io/github/actions/workflow/status/Souitou-iop/easyopen/android-release.yml?label=build" alt="Build" /></a>
+  <a href="https://developer.android.com/"><img src="https://img.shields.io/badge/Android-13%2B-3DDC84.svg" alt="Android 13+" /></a>
+  <a href="https://developer.apple.com/ios/"> <img src="https://img.shields.io/badge/iOS-17%2B-0A84FF.svg" alt="iOS 17+" /></a>
+  <a href="https://kotlinlang.org/"><img src="https://img.shields.io/badge/Kotlin-2.3.21-7F52FF.svg" alt="Kotlin" /></a>
+  <a href="https://creativecommons.org/licenses/by-nc/4.0/"><img src="https://img.shields.io/badge/License-CC%20BY--NC%204.0-blue.svg" alt="CC BY-NC 4.0" /></a>
 </p>
 
-***
+> **重要提示**：EasyOpen 会向真实门锁发送开门指令。请只在你拥有或获准控制的设备上使用，并在门锁附近环境安全时测试。备份文件和分享二维码包含设备密码，不要公开上传或提交到 Git。
 
-## 项目简介
+## 项目是什么
 
-EasyOpen 是一个面向 YILA 开门器的本地控制工具，提供 **Android 原生应用** 和 **Web Bluetooth 网页版** （不再维护）两种形态。
+EasyOpen 是一个**本地 BLE 开门工具**，目前包含：
 
-项目只实现本地 BLE 开门主链路，不依赖登录、云端、MQTT、网关或远程开门服务。
+- Android 原生应用：主要使用 Kotlin、Jetpack Compose 和 Android BLE API；
+- iOS 原生应用：主要使用 SwiftUI、CoreBluetooth 和 Keychain；
+- Web Bluetooth 版本：保留用于实验和本地浏览器测试，已不再作为主要产品维护。
 
-## 主要功能
+项目不依赖账号、云端、MQTT、网关或远程开门服务。蓝牙连接和开门数据处理都在当前设备上完成。
 
-- 搜索附近的 YILA 开门器，并通过 6 位数字密码完成配对初始化。
-- 本地 BLE 连接、状态展示、重试与一键开门。
-- 配置开门方向，以及开启、保持、关闭时长。
-- 保存多台开门器配置，并在主页快速切换。
-- 读取开门器广播中的电量信息（设备支持时）。
-- 使用写入指定 NDEF MIME 内容的 NFC 标签碰一碰开门；不绑定标签 UID。
-- 可选的自动连接、进入 App 自动开门、二维码分享和备份恢复。
-- 提供无需安装 APK 的 Web Bluetooth 版本，以及可通过 ADB 隧道在手机本地使用的脚本。
+### 当前边界
 
-## Android 版
+- Android 使用设备的蓝牙 MAC 地址连接开门器；
+- iOS 使用系统分配的 `CBPeripheral.identifier` 连接，不能直接读取或使用 BLE 底层 MAC；
+- iOS 从 Android 配置导入后，需要重新绑定对应的 iOS 蓝牙设备；
+- NFC 标签只携带唤起命令，不携带设备密码，也不绑定标签 UID；
+- NFC NDEF 内容可以被复制，因此 NFC 标签本身不是防复制安全凭证；
+- 未签名 IPA 仅用于构建检查，不能直接安装到普通 iPhone。
 
-### 环境要求
+## 快速开始
 
-- Android 13.0（API 33）及以上。
-- 首次使用需要蓝牙扫描、蓝牙连接权限；部分系统可能同时要求定位权限。
-- NFC 开门需要设备支持并开启 NFC；标签必须先写入 EasyOpen 的 NDEF MIME 内容。
-- 扫描二维码需要相机权限。
+### Android 用户
 
-### 使用流程
+1. 在 Android 13 或更高版本设备上安装 EasyOpen。
+2. 打开蓝牙；首次运行时授予蓝牙扫描、蓝牙连接权限。部分系统还会要求定位权限。
+3. 搜索附近的 YILA 开门器。
+4. 输入设备的 6 位数字密码完成配对。
+5. 在设备设置中确认方向、开启、保持和关闭时长。
+6. 回到主页，点击“一键开锁”测试连接。
 
-1. 打开手机蓝牙，并启动 EasyOpen。
-2. 按提示授予蓝牙权限；需要时同时授予定位权限。
-3. 搜索附近的 YILA 开门器，输入设备的 6 位数字密码并完成配对。
-4. 根据实际设备配置方向、开启时长、保持时长和关闭时长。
-5. 回到主页，确认设备状态后点击“一键开门”。
-6. 如需 NFC：展开主页“开门器设置”，点击“写入NFC标签”，再将手机靠近空白标签。应用会写入一条 EasyOpen 自有 NDEF MIME 记录：类型为 `application/com.juren233.easyopen.unlock`，内容为 `unlock_current=1`。如果标签已有 NDEF 内容，应用会先让你选择保留还是覆盖；选择保留时，原有记录会保留，EasyOpen 记录会放在第一条以确保 Android 能正确唤起 EasyOpen。
-7. 也可以使用其他 NFC 写入工具手动写入同样的 EasyOpen MIME 类型。写入成功后，即使没有手动打开 EasyOpen，直接将手机碰到该标签，Android 会自动唤起 EasyOpen 的 NFC 入口并执行开门；标签不需要在设置中绑定 UID。NDEF 内容可以被复制，因此它不是防复制的安全凭证。
+Android 的 NFC 快捷开锁流程为：
 
-### 构建与测试
+```text
+NFC 标签
+→ NfcEntryActivity
+→ 读取当前保存设备
+→ controller.unlock()
+→ connectGatt()
+→ 写入开锁指令
+```
 
-在项目根目录执行：
+后台碰 NFC 时，Android 使用独立的无界面 NFC 入口，不要求先打开主界面。
+
+### iOS 用户
+
+1. 在 iOS 17 或更高版本设备上安装经过签名的 EasyOpen。
+2. 打开蓝牙并授予蓝牙权限。
+3. 在“添加开锁器”中扫描 YILA 设备。
+4. 输入 6 位数字密码完成配对。
+5. 确认设置页显示“已绑定 iOS 蓝牙设备”。
+6. 回到主页点击“一键开锁”测试。
+
+iOS 的 NFC 快捷开锁流程为：
+
+```text
+NFC / 快捷指令
+→ easyopen://unlock
+→ 读取当前设备
+→ retrievePeripherals / 扫描
+→ central.connect()
+→ 服务发现和通知初始化
+→ 写入开锁指令
+```
+
+iOS 从 Android 备份导入设备后，如果显示“未绑定 iOS 蓝牙设备”，请进入设置并使用“重新绑定蓝牙设备”。绑定完成后，后续 NFC 开锁会优先使用保存的 `CBPeripheral.identifier`，不需要每次全量扫描。
+
+## NFC 快捷开锁
+
+### Android 写入标签
+
+在主页的 NFC 功能中写入标签。EasyOpen 使用以下应用专用 MIME 类型：
+
+```text
+application/com.juren233.easyopen.unlock
+```
+
+记录内容为：
+
+```text
+unlock_current=1
+```
+
+Android 会通过 `NfcEntryActivity` 接收这类 NDEF 标签。标签不需要与某个 UID 绑定；只要标签内容正确，系统即可唤起 EasyOpen 并尝试开锁。
+
+如果标签已有 NDEF 内容，应用可以选择：
+
+- 覆盖原有内容；
+- 保留原有记录，并把 EasyOpen 记录放到第一条。
+
+### iOS 快捷指令
+
+iOS 使用 URL Scheme：
+
+```text
+easyopen://unlock
+```
+
+也可以指定一个已导入并已绑定的设备：
+
+```text
+easyopen://unlock?device=<设备 UUID>
+```
+
+在快捷指令中使用“打开 URL”即可。当前 iOS App 内部不会再弹出开锁二次确认，收到 URL 后会直接执行连接和开锁流程。
+
+> iOS 仍可能根据系统版本、设备锁定状态和快捷指令配置显示系统级提示；应用自身无法绕过 iOS 的系统安全策略。
+
+## 配置分享与备份
+
+### 二维码分享
+
+Android 和 iOS 使用兼容的加密分享格式：
+
+```text
+EASYOPEN-SHARE:2:<base64url(iv)>.<base64url(ciphertext+tag)>
+```
+
+特点：
+
+- AES-GCM 加密并校验完整性；
+- 随机 12 字节 IV；
+- URL-safe Base64；
+- 支持多台设备；
+- 包含设备参数和密码。
+
+二维码分享适合在自己的 Android 和 iOS 设备之间迁移配置。由于二维码内容包含密码，只应通过可信渠道传输。
+
+### JSON 备份
+
+当前还兼容 Android v1 明文 JSON 备份，内容包括：
+
+- 当前设备；
+- 设备名称和蓝牙 MAC；
+- 6 位密码；
+- 开门方向和动作时长；
+- 电量信息；
+- 主题和自动连接设置。
+
+导入 Android JSON 到 iOS 时：
+
+- MAC 作为跨平台逻辑标识保留；
+- iOS 不会把 MAC 当成实际蓝牙连接地址；
+- iOS 会清除无法跨平台恢复的 `CBPeripheral.identifier`；
+- 导入后需要重新绑定 iOS 蓝牙设备；
+- 如果本地已有相同 MAC 的设备，会更新配置并保留原有 iOS 蓝牙绑定。
+
+## 构建和测试
+
+### Android
+
+环境要求：
+
+- JDK 17；
+- Android SDK 37；
+- Android Studio 或可用的 Gradle 环境。
+
+运行单元测试：
 
 ```bash
-# 运行 JVM 单元测试
 ./gradlew --no-daemon --max-workers=2 :app:testDebugUnitTest
+```
 
-# 构建使用正式签名的 Debug APK
+构建未签名 Debug APK，仅用于本地验证：
+
+```bash
+./gradlew --no-daemon --max-workers=2 :app:assembleDebug -PallowUnsigned=true
+```
+
+构建正式签名版本：
+
+```bash
 ./gradlew --no-daemon --max-workers=2 :app:assembleDebug
-
-# 构建使用同一正式签名的 Release APK
 ./gradlew --no-daemon --max-workers=2 :app:assembleRelease
 ```
 
-生成的 APK 位于：
+正式签名构建需要本地 `keystore.properties`。请根据 [`keystore.properties.example`](keystore.properties.example) 配置，不要提交密钥、密码或 JKS 文件。
+
+输出位置：
 
 ```text
 app/build/outputs/apk/debug/app-debug.apk
 app/build/outputs/apk/release/app-release.apk
 ```
 
-Debug 和 Release 默认使用项目的同一份正式签名。签名私钥只保存在本地的 `signing/easyopen-release.jks`，不应提交到仓库；首次克隆项目时，请按 [`keystore.properties.example`](keystore.properties.example) 创建本地 `keystore.properties`。
+### iOS
 
-## Web Bluetooth 版（不再维护）
+环境要求：
 
-网页版本位于 [`web/`](web/)，不需要安装 APK。浏览器必须支持 Web Bluetooth；正式部署建议使用 HTTPS，本地开发可使用 `localhost`。
+- macOS；
+- Xcode；
+- iOS SDK 17 或更高版本。
 
-### 本机启动
+运行模拟器测试：
+
+```bash
+xcodebuild \
+  -project ios/EasyOpen.xcodeproj \
+  -scheme EasyOpen \
+  -destination 'platform=iOS Simulator,name=iPhone 17 Pro' \
+  CODE_SIGNING_ALLOWED=NO \
+  CODE_SIGNING_REQUIRED=NO \
+  test
+```
+
+构建未签名 IPA：
+
+```bash
+OUT="build-unsigned-current"
+mkdir -p "$OUT"
+xcodebuild \
+  -project ios/EasyOpen.xcodeproj \
+  -scheme EasyOpen \
+  -configuration Release \
+  -sdk iphoneos \
+  -destination 'generic/platform=iOS' \
+  -archivePath "$OUT/EasyOpen.xcarchive" \
+  CODE_SIGNING_ALLOWED=NO \
+  CODE_SIGNING_REQUIRED=NO \
+  archive
+
+mkdir -p "$OUT/Payload"
+cp -R "$OUT/EasyOpen.xcarchive/Products/Applications/EasyOpen.app" "$OUT/Payload/"
+(cd "$OUT" && zip -qry EasyOpen-unsigned.ipa Payload)
+```
+
+未签名 IPA 可以证明工程和包结构能够构建，但不能替代真机验证，也不能直接安装到普通 iPhone。真机验证需要 Apple 签名、合适的开发者配置，以及真实 NFC 标签和 YILA 开门器。
+
+## 代码结构
+
+```text
+app/                                      Android 应用
+app/src/main/java/com/juren233/easyopen/
+  ble/                                    Android BLE 扫描、连接、重试和 GATT 会话
+  data/                                   设备配置、持久化和传输格式
+  nfc/                                    NDEF 读取、写入和 NFC 命令
+  ui/                                     Compose 页面和 UI 组件
+ios/                                     iOS Xcode 工程
+  EasyOpen/BLE/                           CoreBluetooth 管理和开锁事务
+  EasyOpen/Persistence/                   Keychain 与设备配置
+  EasyOpen/Protocol/                      协议包构造和响应解析
+  EasyOpen/Transfer/                      Android/iOS 分享和备份兼容
+web/                                      Web Bluetooth 实验版本
+extracted/                                协议研究和逆向分析材料
+ARCHITECTURE.md                           Android 架构说明
+docs/assets/easyopen-icon.png             README 使用的项目图标
+```
+
+### BLE 协议概览
+
+Android、iOS 和 Web 端使用同一组 YILA BLE 服务标识：
+
+```text
+Service: 6e400001-b5a3-f393-e0a9-e50e24dcca9e
+Write:   6e400002-b5a3-f393-e0a9-e50e24dcca9e
+Notify:  6e400003-b5a3-f393-e0a9-e50e24dcca9e
+```
+
+开锁请求包含设备动作参数、时间戳和密码派生数据。协议实现位于：
+
+- Android：`app/src/main/java/com/juren233/easyopen/ble/UnlockProtocol.kt`
+- iOS：`ios/EasyOpen/Protocol/UnlockProtocol.swift`
+- Web：`web/` 中的 BLE 实现
+
+协议解析和数据迁移逻辑应保持为可测试的纯逻辑，页面不应直接操作 GATT 或本地存储。
+
+## Web Bluetooth 版本
+
+Web 版本位于 [`web/`](web/)，适合：
+
+- 支持 Web Bluetooth 的 Android Chrome；
+- HTTPS 静态站点；
+- `localhost` 本地开发；
+- 通过 ADB 隧道在手机上访问电脑本地页面。
+
+本地启动：
 
 ```bash
 cd web
 python3 -m http.server 8765
 ```
 
-然后在支持 Web Bluetooth 的浏览器中打开：
+然后打开：
 
 ```text
 http://localhost:8765/
 ```
 
-也可以使用单文件版本 [`web/easyopen.html`](web/easyopen.html)。完整的浏览器兼容性、协议和安全边界说明见 [`web/README.md`](web/README.md)。
+也可以使用单文件版本：
 
-### 通过 ADB 在手机本地使用
+```text
+web/easyopen.html
+```
 
-如果不想部署到公网，可以让电脑启动本地静态服务，再通过 ADB 反向隧道让手机访问：
+Web Bluetooth 受浏览器权限和生命周期限制：
+
+- 无法像 Android 原生应用一样按 MAC 地址自动选择设备；
+- 不能保证后台持续运行；
+- 页面关闭或浏览器回收后需要重新连接；
+- 正式部署建议使用 HTTPS；
+- 网页拥有蓝牙 GATT 写入权限，请不要部署到不可信站点。
+
+通过 ADB 在手机本地启动：
 
 ```bash
 ./web/serve-phone.sh
 ```
 
-确认 `adb devices` 中的设备状态为 `device` 后，在手机 Chrome 打开 `http://localhost:8765/easyopen.html`。网页中的蓝牙操作仍由手机浏览器和手机蓝牙适配器完成。
+使用前确保：
 
-## 数据与安全提示
-
-- Android 端会在本地保存已配对设备配置，其中包括开门器密码；请妥善保护手机和备份文件。
-- 分享二维码和备份文件包含开门器密码，只应发送给可信的人。
-- Web 版不会将密码写入 `localStorage`，刷新页面后需要重新输入。
-- Web 版和 Android 版都只执行本地 BLE 操作，不提供远程开门能力。
-- 实际设备控制具有物理风险。首次配对或修改动作参数后，请在确认设备周围安全的情况下测试。
-
-## 项目结构
-
-```text
-app/                         Android 应用源码
-web/                         Web Bluetooth 版本
-extracted/                   原始 APK 的逆向分析与协议重建记录
-signing/easyopen-release-cert.sha256  正式签名证书公开指纹
-ARCHITECTURE.md              Android 端代码组织说明
+```bash
+adb devices
 ```
 
-`extracted/` 中的原始 APK、反编译文件和逆向分析材料用于协议研究，不应默认视为本项目原创内容，也不自动适用本项目的 CC BY-NC 4.0 许可。重新分发这些材料前，请确认你拥有相应权利。
+设备状态应为 `device`，而不是 `unauthorized` 或 `offline`。
 
-## 许可证与第三方组件
+## 安全与隐私
 
-除特别注明外，EasyOpen 的原创 Android/Web 源代码、文档和原创资源采用 [CC BY-NC 4.0 International](https://creativecommons.org/licenses/by-nc/4.0/) 许可，详见 [`LICENSE`](LICENSE)。
+- 密码保存在本地；iOS 使用 Keychain，Android 使用应用本地存储。
+- Android v1 JSON 备份是明文，分享前请确认传输渠道可信。
+- 加密二维码包含密码，任何拿到二维码的人都可能尝试解密或导入配置。
+- NFC 标签只包含开锁命令，不包含密码，但命令内容可复制。
+- 项目不提供远程开门、账号系统或云端访问控制。
+- 不要把 `keystore.properties`、JKS/keystore、真实备份、设备密码或真机日志提交到公开仓库。
+- `extracted/` 主要用于协议研究和兼容性分析，其中的原始材料不当然属于本项目原创内容。
 
-> 注意：CC BY-NC 4.0 包含“非商业使用”限制。它允许非商业分享和改编，但不属于 OSI 定义的传统软件开源许可证。若要将 EasyOpen 的原创部分用于商业产品或商业分发，请先取得额外授权。
+## 贡献和问题反馈
 
-本项目当前直接使用的主要第三方组件如下。第三方组件不受本项目 CC BY-NC 4.0 声明覆盖，仍按其各自许可证执行：
+提交 Issue 或 Pull Request 时，请尽量提供：
 
-| 组件                                    | 用途                  | 许可证        | 上游许可证/项目                                                                                                        |
-| :------------------------------------ | :------------------ | :--------- | :-------------------------------------------------------------------------------------------------------------- |
-| AndroidX、Jetpack Compose、Navigation 3 | Android 基础能力、UI 与导航 | Apache-2.0 | [androidx/androidx](https://github.com/androidx/androidx/blob/androidx-main/LICENSE.txt)                        |
-| Kotlin Standard Library               | Kotlin 运行时          | Apache-2.0 | [JetBrains/kotlin](https://github.com/JetBrains/kotlin/blob/master/license/LICENSE.txt)                         |
-| kotlinx.serialization                 | 分享/备份数据序列化          | Apache-2.0 | [Kotlin/kotlinx.serialization](https://github.com/Kotlin/kotlinx.serialization/blob/master/LICENSE.txt)         |
-| Miuix                                 | Android 界面组件与主题     | Apache-2.0 | [compose-miuix-ui/miuix](https://github.com/compose-miuix-ui/miuix/blob/main/LICENSE)                           |
-| ZXing Core                            | 二维码编码/解码核心          | Apache-2.0 | [zxing/zxing](https://github.com/zxing/zxing/blob/master/LICENSE)                                               |
-| ZXing Android Embedded                | Android 相机扫码集成      | Apache-2.0 | [journeyapps/zxing-android-embedded](https://github.com/journeyapps/zxing-android-embedded/blob/master/COPYING) |
+- 使用的平台和系统版本；
+- EasyOpen 版本或 commit；
+- 设备型号和 YILA 固件信息；
+- 是否已绑定 iOS `CBPeripheral.identifier`；
+- 复现步骤和脱敏日志；
+- 失败发生在扫描、连接、服务发现、写入还是响应阶段。
 
+请不要上传包含密码、Keychain 内容、完整备份 JSON 或私有设备标识的日志。
+
+## 许可证
+
+除特别注明外，EasyOpen 的原创源代码、文档和原创资源采用 [CC BY-NC 4.0 International](https://creativecommons.org/licenses/by-nc/4.0/) 许可，详见 [`LICENSE`](LICENSE)。
+
+CC BY-NC 4.0 包含非商业使用限制，并不是 OSI 定义的传统软件开源许可证。商业使用或商业分发需要另行取得授权。
+
+AndroidX、Jetpack Compose、Kotlin、Miuix、ZXing 和其他第三方组件仍按各自许可证执行。协议研究材料和 `extracted/` 中的第三方内容不自动适用本项目许可证。
