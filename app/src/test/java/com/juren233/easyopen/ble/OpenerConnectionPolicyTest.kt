@@ -25,15 +25,17 @@ class OpenerConnectionPolicyTest {
     }
 
     @Test
+    fun signalFreshnessDoesNotOverrideRssiThreshold() {
+        assertTrue(OpenerConnectionPolicy.isSignalFresh(10_000L, 10_100L))
+        assertFalse(OpenerConnectionPolicy.shouldAutoConnect(-91, -90))
+        assertTrue(OpenerConnectionPolicy.shouldAutoConnect(-90, -90))
+    }
+
+    @Test
     fun customRssiInputAlwaysBecomesNegativeAndStaysInBleRange() {
         assertEquals(-92, AutoConnectSettings.normalizeRssiThreshold(92))
         assertEquals(-127, AutoConnectSettings.normalizeRssiThreshold(-200))
         assertEquals(-1, AutoConnectSettings.normalizeRssiThreshold(0))
-    }
-
-    @Test
-    fun autoConnectRetryCooldownStaysWithinHalfASecond() {
-        assertTrue(OpenerConnectionPolicy.AUTO_CONNECT_RETRY_COOLDOWN_MS <= 500L)
     }
 
     @Test

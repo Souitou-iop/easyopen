@@ -5,6 +5,8 @@ import android.content.Intent
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
+import android.util.Log
 import com.juren233.easyopen.ble.BleDoorController
 import com.juren233.easyopen.data.DeviceStore
 import com.juren233.easyopen.nfc.NfcCommand
@@ -23,7 +25,11 @@ class NfcEntryActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        controller = BleDoorController(applicationContext)
+        controller = (application as EasyOpenApplication).bleDoorController
+        Log.i(
+            TAG,
+            "BLE_OWNER controller=${System.identityHashCode(controller)} pid=${android.os.Process.myPid()}",
+        )
         triggerUnlock(intent)
     }
 
@@ -41,6 +47,12 @@ class NfcEntryActivity : Activity() {
             it.address.equals(activeAddress, ignoreCase = true)
         } ?: devices.firstOrNull()
 
+        Log.d(
+            TAG,
+            "NFC_BLE trigger hasUnlockIntent=${NfcCommand.isUnlockIntent(intent)} " +
+                "profile=${activeProfile?.address ?: "none"} elapsedMs=${SystemClock.elapsedRealtime()}",
+        )
+
         if (
             NfcCommand.isUnlockIntent(intent) &&
             activeProfile != null &&
@@ -48,7 +60,11 @@ class NfcEntryActivity : Activity() {
             controller.isBluetoothEnabled()
         ) {
             unlockTriggered = true
-            controller.unlock(activeProfile)
+            Log.d(TAG, "NFC_BLE unlock_requested address=${activeProfile.address}")
+            controller.unlock(activeProfile) { success ->
+                Log.d(TAG, "NFC_BLE unlock_complete success=$success")
+                mainHandler.post(::finishEntry)
+            }
             mainHandler.removeCallbacks(finishRunnable)
             mainHandler.postDelayed(finishRunnable, BLE_UNLOCK_GRACE_PERIOD_MS)
         } else {
@@ -60,17 +76,19 @@ class NfcEntryActivity : Activity() {
         if (entryFinished) return
         entryFinished = true
         mainHandler.removeCallbacks(finishRunnable)
-        controller.disconnect()
+        Log.d(TAG, "NFC_BLE finish elapsedMs=${SystemClock.elapsedRealtime()}")
+        controller.releaseAfterNfcUnlock()
         finish()
     }
 
     override fun onDestroy() {
         mainHandler.removeCallbacks(finishRunnable)
-        if (!entryFinished) controller.disconnect()
+        if (!entryFinished) controller.releaseAfterNfcUnlock()
         super.onDestroy()
     }
 
     private companion object {
+        const val TAG = "NfcEntryActivity"
         // BleDoorController's unlock operation times out after 8 seconds.
         const val BLE_UNLOCK_GRACE_PERIOD_MS = 9_000L
     }

@@ -10,9 +10,6 @@ object OpenerConnectionPolicy {
     /** Keep a recent discovery visible across a short scan restart gap. */
     const val SIGNAL_STALE_AFTER_MS = 15_000L
 
-    /** Short guard against duplicate callbacks without delaying the next real attempt. */
-    const val AUTO_CONNECT_RETRY_COOLDOWN_MS = 450L
-
     fun shouldAutoConnect(
         rssi: Int,
         threshold: Int = AUTO_CONNECT_RSSI_THRESHOLD,
