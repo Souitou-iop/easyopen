@@ -77,30 +77,6 @@ app/build/outputs/apk/release/app-release.apk
 
 Debug 和 Release 默认使用项目的同一份正式签名。签名私钥只保存在本地的 `signing/easyopen-release.jks`，不应提交到仓库；首次克隆项目时，请按 [`keystore.properties.example`](keystore.properties.example) 创建本地 `keystore.properties`。
 
-## 版本与 GitHub Actions
-
-项目沿用 HLE 的版本门和发布渠道机制，工作流位于 [`.github/workflows/android-release.yml`](.github/workflows/android-release.yml)：
-
-- Pull Request：构建并上传 APK 构建产物，不创建 Release。
-- `workflow_dispatch`：手动触发构建。
-- 推送到 `main`：只有版本名或 `versionCode` 变化时才构建稳定版；`-beta` 和 `-canary` 版本会按渠道自动构建。
-- `0.1.0`：创建正式 Release，上传 Debug 与 Release APK。
-- `0.1.0-beta`：自动生成 `v0.1.0-beta.1` 等 Pre-release。
-- `0.1.0-canary`：自动生成 `v0.1.0-canary.1` 等标签，并上传 Canary 构建产物。
-
-版本号只需要修改 [`app/build.gradle.kts`](app/build.gradle.kts) 中的 `versionName` 和 `versionCode`。Beta/Canary 的序号由 GitHub Actions 根据已有标签自动递增，构建时通过 `ciVersionName` 注入，不会改写源码版本。
-
-应用会在每次进入前台时检查 GitHub 的最新正式 Release。只有检测到更高的 `versionCode` 时，主页顶部才显示更新横幅；没有更新时主页保持原来的无横幅状态。
-
-正式签名使用 `easyopen-release` 密钥，Debug、Release 以及 GitHub Actions 的非 Pull Request 构建都使用同一份签名。GitHub Actions 需要配置：
-
-- `SIGNING_KEY`：`signing/easyopen-release.jks` 的 Base64 内容。
-- `KEY_STORE_PASSWORD`：`keystore.properties` 中的 `storePassword`。
-- `KEY_PASSWORD`：`keystore.properties` 中的 `keyPassword`。
-- `ALIAS`：`easyopen-release`。
-
-工作流会用 [`signing/easyopen-release-cert.sha256`](signing/easyopen-release-cert.sha256) 校验产物证书指纹，避免误用另一份签名。外部 Pull Request 无法读取仓库 Secrets，因此仅作为明确标记的无签名验证构建，不会创建 Release。
-
 ## Web Bluetooth 版
 
 网页版本位于 [`web/`](web/)，不需要安装 APK。浏览器必须支持 Web Bluetooth；正式部署建议使用 HTTPS，本地开发可使用 `localhost`。

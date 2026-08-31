@@ -72,7 +72,7 @@ jobs:
         if: steps.gate.outputs.skip != 'true'
         uses: android-actions/setup-android@v4
         with:
-          packages: platform-tools platforms;android-37 build-tools;37.0.0
+          packages: platform-tools platforms;android-37.0 build-tools;37.0.0
 
       - name: 配置 Gradle Setup Gradle
         if: steps.gate.outputs.skip != 'true'
