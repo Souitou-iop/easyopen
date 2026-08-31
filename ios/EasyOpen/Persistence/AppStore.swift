@@ -53,6 +53,9 @@ import Foundation
                 var existing = devices[index]
                 existing.name = imported.profile.name
                 existing.legacyAddress = imported.profile.legacyAddress
+                if existing.peripheralIdentifier == nil {
+                    existing.peripheralIdentifier = imported.profile.peripheralIdentifier
+                }
                 existing.attribute = imported.profile.attribute
                 existing.openTimeMs = imported.profile.openTimeMs
                 existing.waitTimeMs = imported.profile.waitTimeMs
@@ -63,7 +66,6 @@ import Foundation
             } else {
                 var profile = imported.profile
                 profile.id = UUID()
-                profile.peripheralIdentifier = nil
                 profile.passwordKeychainID = UUID().uuidString
                 if savePasswords { try keychain.save(imported.password, for: profile.passwordKeychainID) }
                 devices.append(profile)

@@ -25,6 +25,7 @@ struct TransferCodec {
         var waitTimeMs: Int
         var closeTimeMs: Int
         var batteryLevel: Int?
+        var iosPeripheralIdentifier: String? = nil
     }
     private struct LegacyEnvelope: Codable {
         var version: Int
@@ -95,7 +96,8 @@ struct TransferCodec {
             return LegacyProfile(name: device.name, address: normalizedAddress(device.legacyAddress), password: password,
                                  attribute: device.attribute.clamped(to: 0...1), openTimeMs: device.openTimeMs.clamped(to: 0...60000),
                                  waitTimeMs: device.waitTimeMs.clamped(to: 0...60000), closeTimeMs: device.closeTimeMs.clamped(to: 0...60000),
-                                 batteryLevel: device.batteryLevel.map { $0.clamped(to: 1...5) })
+                                 batteryLevel: device.batteryLevel.map { $0.clamped(to: 1...5) },
+                                 iosPeripheralIdentifier: device.peripheralIdentifier?.uuidString)
         }
         let envelope = BackupEnvelope(version: 1, activeAddress: normalizedAddress(activeDevice?.legacyAddress),
                                       themeMode: themeMode.clamped(to: 0...2), monetEnabled: monetEnabled,
@@ -156,7 +158,11 @@ struct TransferCodec {
     }
     private static func makeImported(_ p: LegacyProfile) -> ImportedProfile? {
         guard p.password.count == 6, p.password.allSatisfy(\.isNumber), p.address.range(of: "^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}$", options: .regularExpression) != nil else { return nil }
-        return ImportedProfile(profile: DeviceProfile(name: p.name.isEmpty ? "我的开门器" : p.name, legacyAddress: normalizedAddress(p.address), attribute: p.attribute.clamped(to: 0...1), openTimeMs: p.openTimeMs.clamped(to: 0...60000), waitTimeMs: p.waitTimeMs.clamped(to: 0...60000), closeTimeMs: p.closeTimeMs.clamped(to: 0...60000), batteryLevel: p.batteryLevel?.clamped(to: 1...5)), password: p.password)
+        return ImportedProfile(profile: DeviceProfile(name: p.name.isEmpty ? "我的开门器" : p.name,
+            peripheralIdentifier: p.iosPeripheralIdentifier.flatMap(UUID.init),
+            legacyAddress: normalizedAddress(p.address), attribute: p.attribute.clamped(to: 0...1),
+            openTimeMs: p.openTimeMs.clamped(to: 0...60000), waitTimeMs: p.waitTimeMs.clamped(to: 0...60000),
+            closeTimeMs: p.closeTimeMs.clamped(to: 0...60000), batteryLevel: p.batteryLevel?.clamped(to: 1...5)), password: p.password)
     }
     private static func normalizedAddress(_ value: String?) -> String { value?.uppercased() ?? "00:00:00:00:00:00" }
 }

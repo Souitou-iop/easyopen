@@ -17,7 +17,7 @@ import SwiftUI
                     }
                     if phase == .background {
                         autoUnlockHandled = false
-                        bluetooth.enterBackground()
+                        bluetooth.enterBackground(keepConnection: store.nfcAutoUnlock)
                     }
                 }
         }

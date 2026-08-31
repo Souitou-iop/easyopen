@@ -28,6 +28,8 @@ import CoreBluetooth
     private var pendingUnboundSelectionTask: Task<Void, Never>?
     private var shouldScanWhenPoweredOn = false
     private var appInForeground = true
+    private var retainConnectionInBackground = false
+    private var backgroundReleaseTask: Task<Void, Never>?
     private var reconnectingForForeground = false
     private var foregroundReconnectTask: Task<Void, Never>?
 
@@ -62,14 +64,22 @@ import CoreBluetooth
         central?.stopScan()
     }
 
-    func enterBackground() {
+    func enterBackground(keepConnection: Bool = false) {
         appInForeground = false
+        retainConnectionInBackground = keepConnection
+        backgroundReleaseTask?.cancel()
+        backgroundReleaseTask = nil
         foregroundReconnectTask?.cancel()
         foregroundReconnectTask = nil
         reconnectingForForeground = false
         stopMonitoring()
         if operationInFlight {
-            // Let an active pairing/unlock finish, then release the GATT link.
+            // Let an active pairing/unlock finish, then release or retain the GATT link.
+            return
+        }
+        if keepConnection && hasUsableConnection {
+            // NFC can reuse the ready GATT session when the app is brought back.
+            scheduleBackgroundRelease()
             return
         }
         disconnect()
@@ -77,9 +87,12 @@ import CoreBluetooth
 
     func enterForeground(profile: DeviceProfile?) {
         appInForeground = true
+        retainConnectionInBackground = false
+        backgroundReleaseTask?.cancel()
+        backgroundReleaseTask = nil
         foregroundReconnectTask?.cancel()
         foregroundReconnectTask = nil
-        guard let profile, state != .ready else { return }
+        guard let profile, !hasUsableConnection(for: profile) else { return }
         reconnectingForForeground = true
         foregroundReconnectTask = Task { @MainActor in
             defer {
@@ -113,7 +126,9 @@ import CoreBluetooth
         operationInFlight = true
         defer {
             operationInFlight = false
-            if !appInForeground { disconnect() }
+            if !appInForeground {
+                if retainConnectionInBackground { scheduleBackgroundRelease() } else { disconnect() }
+            }
         }
         stopScan(); state = .connecting; peripheral = p; p.delegate = self
         try await awaitConnection(p)
@@ -159,7 +174,7 @@ import CoreBluetooth
             // false operation-in-progress error and dropping the unlock request.
             await task.value
         }
-        if state == .ready, peripheral?.identifier == profile.peripheralIdentifier { return }
+        if hasUsableConnection(for: profile) { state = .ready; return }
 
         // Android backups contain a Bluetooth MAC address, but iOS deliberately does
         // not expose that address. When an imported profile has no iOS UUID yet,
@@ -172,7 +187,10 @@ import CoreBluetooth
             try await connect(candidate)
             return
         }
-        let candidate = discovered.first(where: { $0.identifier == id }) ?? central.retrievePeripherals(withIdentifiers: [id]).first
+        let systemConnected = central.retrieveConnectedPeripherals(
+            withServices: [CBUUID(string: UnlockProtocol.serviceUUID)]
+        ).first(where: { $0.identifier == id })
+        let candidate = discovered.first(where: { $0.identifier == id }) ?? systemConnected ?? central.retrievePeripherals(withIdentifiers: [id]).first
         if let candidate { try await connect(candidate); return }
         let discoveredPeripheral = try await waitForPeripheral(id)
         try await connect(discoveredPeripheral)
@@ -233,19 +251,24 @@ import CoreBluetooth
         operationInFlight = true
         defer {
             operationInFlight = false
-            if !appInForeground { disconnect() }
+            if !appInForeground {
+                if retainConnectionInBackground { scheduleBackgroundRelease() } else { disconnect() }
+            }
         }
         try await write(try UnlockProtocol.buildPasswordPacket(password: password), characteristic: c, notify: n)
     }
 
     func unlock(profile: DeviceProfile, password: String) async throws {
         guard !operationInFlight else { throw AppError.operationInProgress }
+        if hasUsableConnection(for: profile) { state = .ready }
         guard state == .ready, let c = writeCharacteristic, let n = notifyCharacteristic else { throw AppError.serviceMissing }
         operationInFlight = true; state = .unlocking
         defer {
             operationInFlight = false
             if state == .unlocking { state = .ready }
-            if !appInForeground { disconnect() }
+            if !appInForeground {
+                if retainConnectionInBackground { scheduleBackgroundRelease() } else { disconnect() }
+            }
         }
         try await write(try UnlockProtocol.buildOpenPacket(profile: profile, password: password), characteristic: c, notify: n)
         state = .success
@@ -269,7 +292,30 @@ import CoreBluetooth
         if !UnlockProtocol.isSuccess(response) { throw AppError.writeFailed }
     }
 
+    private var hasUsableConnection: Bool {
+        peripheral?.state == .connected && writeCharacteristic != nil && notifyCharacteristic != nil
+    }
+
+    private func hasUsableConnection(for profile: DeviceProfile) -> Bool {
+        guard let expectedID = profile.peripheralIdentifier else { return false }
+        return hasUsableConnection && peripheral?.identifier == expectedID
+    }
+
+    private func scheduleBackgroundRelease() {
+        backgroundReleaseTask?.cancel()
+        // ponytail: keep the GATT lease to Android's 2s window, then release the channel.
+        backgroundReleaseTask = Task { @MainActor in
+            try? await Task.sleep(for: .seconds(2))
+            guard !Task.isCancelled, !self.appInForeground,
+                  self.retainConnectionInBackground, self.hasUsableConnection else { return }
+            self.disconnect()
+        }
+    }
+
     func disconnect() {
+        retainConnectionInBackground = false
+        backgroundReleaseTask?.cancel()
+        backgroundReleaseTask = nil
         if let p = peripheral { central.cancelPeripheralConnection(p) }
         clearPending(error: AppError.deviceNotFound); peripheral = nil; writeCharacteristic = nil; notifyCharacteristic = nil; state = .disconnected
     }
