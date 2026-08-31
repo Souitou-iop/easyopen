@@ -6,6 +6,7 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -26,6 +27,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
@@ -52,6 +54,7 @@ import top.yukonga.miuix.kmp.basic.Text as MiuixText
 import top.yukonga.miuix.kmp.basic.TextButton as MiuixTextButton
 import top.yukonga.miuix.kmp.basic.TextField
 import top.yukonga.miuix.kmp.basic.TopAppBar
+import top.yukonga.miuix.kmp.blur.layerBackdrop
 import top.yukonga.miuix.kmp.icon.MiuixIcons
 import top.yukonga.miuix.kmp.icon.extended.Scan
 import top.yukonga.miuix.kmp.icon.extended.Settings
@@ -72,6 +75,9 @@ internal fun HomePage(
     onNfcWriteRequested: () -> Unit,
 ) {
     val activeProfile by activeProfileState
+    val backdrop = rememberMiuixBlurBackdrop()
+    val blurActive = backdrop != null
+    val barColor = if (blurActive) Color.Transparent else MiuixTheme.colorScheme.surface
     val scrollBehavior = MiuixScrollBehavior()
     val listState = rememberLazyListState()
     var showDeviceChooser by rememberSaveable { mutableStateOf(false) }
@@ -108,44 +114,48 @@ internal fun HomePage(
 
     Scaffold(
         topBar = {
-            TopAppBar(
-                title = stringResource(R.string.home_title),
-                scrollBehavior = scrollBehavior,
-                navigationIcon = {
-                    IconButton(onClick = onOpenScanner) {
-                        Icon(
-                            imageVector = MiuixIcons.Scan,
-                            contentDescription = stringResource(R.string.scan_import_title),
-                        )
-                    }
-                },
-                actions = {
-                    IconButton(onClick = ::showShareUi) {
-                        Icon(
-                            imageVector = MiuixIcons.Share,
-                            contentDescription = stringResource(R.string.share_opener_title),
-                        )
-                    }
-                    IconButton(onClick = onOpenSettings) {
-                        Icon(
-                            imageVector = MiuixIcons.Settings,
-                            contentDescription = stringResource(R.string.settings_title),
-                        )
-                    }
-                },
-            )
+            MiuixBlurredBar(backdrop, blurActive) {
+                TopAppBar(
+                    color = barColor,
+                    title = stringResource(R.string.home_title),
+                    scrollBehavior = scrollBehavior,
+                    navigationIcon = {
+                        IconButton(onClick = onOpenScanner) {
+                            Icon(
+                                imageVector = MiuixIcons.Scan,
+                                contentDescription = stringResource(R.string.scan_import_title),
+                            )
+                        }
+                    },
+                    actions = {
+                        IconButton(onClick = ::showShareUi) {
+                            Icon(
+                                imageVector = MiuixIcons.Share,
+                                contentDescription = stringResource(R.string.share_opener_title),
+                            )
+                        }
+                        IconButton(onClick = onOpenSettings) {
+                            Icon(
+                                imageVector = MiuixIcons.Settings,
+                                contentDescription = stringResource(R.string.settings_title),
+                            )
+                        }
+                    },
+                )
+            }
         },
     ) { innerPadding ->
-        LazyColumn(
-            state = listState,
-            modifier = Modifier
-                .nestedScroll(scrollBehavior.nestedScrollConnection)
-                .fillMaxSize(),
-            contentPadding = PaddingValues(
-                top = innerPadding.calculateTopPadding(),
-                bottom = innerPadding.calculateBottomPadding() + 28.dp,
-            ),
-        ) {
+        Box(modifier = if (backdrop != null) Modifier.layerBackdrop(backdrop) else Modifier) {
+            LazyColumn(
+                state = listState,
+                modifier = Modifier
+                    .nestedScroll(scrollBehavior.nestedScrollConnection)
+                    .fillMaxSize(),
+                contentPadding = PaddingValues(
+                    top = innerPadding.calculateTopPadding(),
+                    bottom = innerPadding.calculateBottomPadding() + 28.dp,
+                ),
+            ) {
             availableUpdate?.let { update ->
                 item(key = "update_notice") {
                     Card(
@@ -321,6 +331,7 @@ internal fun HomePage(
                         }
                     }
                 }
+            }
             }
         }
     }

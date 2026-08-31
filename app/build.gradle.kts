@@ -46,10 +46,10 @@ android {
 
     defaultConfig {
         applicationId = "com.juren233.easyopen"
-        minSdk = 26
+        minSdk = 33
         targetSdk = 37
-        versionCode = 37
-        versionName = ciVersionName ?: "1.0.0-beta"
+        versionCode = 41
+        versionName = ciVersionName ?: "1.0.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
@@ -104,6 +104,7 @@ dependencies {
 
     implementation("top.yukonga.miuix.kmp:miuix-ui-android:0.9.3")
     implementation("top.yukonga.miuix.kmp:miuix-preference-android:0.9.3")
+    implementation("top.yukonga.miuix.kmp:miuix-blur-android:0.9.3")
     implementation("top.yukonga.miuix.kmp:miuix-icons-android:0.9.3")
     implementation("top.yukonga.miuix.kmp:miuix-navigation3-ui-android:0.9.3")
     implementation("androidx.navigation3:navigation3-runtime:1.1.0")

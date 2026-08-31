@@ -39,6 +39,7 @@ internal fun EasyOpenContent(
     onSettingsChange: (AppSettings) -> Unit,
     onRequestPermissions: () -> Unit,
     onOpenBluetoothSettings: () -> Unit,
+    onNfcWriteTagReset: () -> Unit,
     nfcEvents: Flow<NfcTagEvent>,
     nfcReaderState: StateFlow<NfcReaderState>,
 ) {
@@ -52,6 +53,8 @@ internal fun EasyOpenContent(
     val nfcWriteScope = rememberCoroutineScope()
     var nfcWriteWaiting by remember { mutableStateOf(false) }
     var nfcWriteRequest by remember { mutableStateOf<NfcWriteRequest?>(null) }
+    var nfcWriteAwaitingTag by remember { mutableStateOf(false) }
+    var nfcWritePreserveOriginal by remember { mutableStateOf<Boolean?>(null) }
     var nfcWriting by remember { mutableStateOf(false) }
     var pairedDevices by remember { mutableStateOf(DeviceStore.load(preferences)) }
     var activeAddress by remember {
@@ -120,12 +123,49 @@ internal fun EasyOpenContent(
     } ?: pairedDevices.firstOrNull()
     val latestActiveProfile by rememberUpdatedState(activeProfile)
     val latestNfcWriteWaiting by rememberUpdatedState(nfcWriteWaiting)
+    val latestNfcWriteRequest by rememberUpdatedState(nfcWriteRequest)
+    val latestNfcWritePreserveOriginal by rememberUpdatedState(nfcWritePreserveOriginal)
     val latestOnboardingComplete by rememberUpdatedState(onboardingComplete)
     val latestPermissionsGranted by rememberUpdatedState(permissionsGranted)
 
+    fun writeFreshNfcTag(
+        event: NfcTagEvent,
+        request: NfcWriteRequest,
+        preserveOriginal: Boolean,
+    ) {
+        nfcWriteScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                NfcTagWriter.write(
+                    tag = event.tag,
+                    originalMessage = request.originalMessage,
+                    originalReadSucceeded = request.originalReadSucceeded,
+                    preserveOriginal = preserveOriginal,
+                )
+            }
+            nfcWriting = false
+            val message = result.fold(
+                onSuccess = { nfcWriteSuccessMessage },
+                onFailure = { error ->
+                    nfcWriteFailedFormat.format(
+                        error.message ?: nfcWriteFailedUnknownMessage,
+                    )
+                },
+            )
+            Toast.makeText(context, message, Toast.LENGTH_LONG).show()
+        }
+    }
+
     LaunchedEffect(nfcEvents) {
         nfcEvents.collect { event ->
-            if (latestNfcWriteWaiting) {
+            val pendingWriteRequest = latestNfcWriteRequest
+            val preserveOriginal = latestNfcWritePreserveOriginal
+            if (pendingWriteRequest != null && preserveOriginal != null) {
+                nfcWriteRequest = null
+                nfcWritePreserveOriginal = null
+                nfcWriteAwaitingTag = false
+                nfcWriting = true
+                writeFreshNfcTag(event, pendingWriteRequest, preserveOriginal)
+            } else if (latestNfcWriteWaiting) {
                 nfcWriteWaiting = false
                 if (!event.ndefReadSucceeded) {
                     Toast.makeText(
@@ -135,7 +175,6 @@ internal fun EasyOpenContent(
                     ).show()
                 } else {
                     nfcWriteRequest = NfcWriteRequest(
-                        tag = event.tag,
                         originalMessage = event.ndefMessage,
                         originalReadSucceeded = event.ndefReadSucceeded,
                     )
@@ -165,7 +204,10 @@ internal fun EasyOpenContent(
             ).show()
             nfcWriting -> Unit
             else -> {
+                onNfcWriteTagReset()
                 nfcWriteRequest = null
+                nfcWriteAwaitingTag = false
+                nfcWritePreserveOriginal = null
                 nfcWriteWaiting = true
             }
         }
@@ -174,28 +216,10 @@ internal fun EasyOpenContent(
 
     fun chooseNfcWriteMode(preserveOriginal: Boolean) {
         val request = nfcWriteRequest ?: return
-        nfcWriteRequest = null
-        nfcWriting = true
-        nfcWriteScope.launch {
-            val result = withContext(Dispatchers.IO) {
-                NfcTagWriter.write(
-                    tag = request.tag,
-                    originalMessage = request.originalMessage,
-                    originalReadSucceeded = request.originalReadSucceeded,
-                    preserveOriginal = preserveOriginal,
-                )
-            }
-            nfcWriting = false
-            val message = result.fold(
-                onSuccess = { nfcWriteSuccessMessage },
-                onFailure = { error ->
-                    nfcWriteFailedFormat.format(
-                        error.message ?: nfcWriteFailedUnknownMessage,
-                    )
-                },
-            )
-            Toast.makeText(context, message, Toast.LENGTH_LONG).show()
-        }
+        if (nfcWriteAwaitingTag || nfcWriting) return
+        onNfcWriteTagReset()
+        nfcWritePreserveOriginal = preserveOriginal
+        nfcWriteAwaitingTag = true
     }
 
     when {
@@ -304,13 +328,16 @@ internal fun EasyOpenContent(
     // dialogs here makes waiting/choice/cancel transitions immediate.
     NfcWriteDialogs(
         waiting = nfcWriteWaiting,
-        request = nfcWriteRequest,
+        request = nfcWriteRequest.takeUnless { nfcWriteAwaitingTag },
+        awaitingTag = nfcWriteAwaitingTag,
         writing = nfcWriting,
         onChoice = ::chooseNfcWriteMode,
         onCancel = {
             if (!nfcWriting) {
                 nfcWriteWaiting = false
                 nfcWriteRequest = null
+                nfcWriteAwaitingTag = false
+                nfcWritePreserveOriginal = null
             }
         },
     )

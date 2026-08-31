@@ -8,6 +8,7 @@ import android.nfc.NfcAdapter
 import android.nfc.Tag
 import android.os.Build
 import android.os.SystemClock
+import android.util.Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -37,7 +38,6 @@ data class NfcTagEvent(
 }
 
 data class NfcWriteRequest(
-    val tag: Tag,
     val originalMessage: NdefMessage?,
     val originalReadSucceeded: Boolean,
 )
@@ -111,12 +111,39 @@ class NfcTagReader(
         eventsChannel.close()
     }
 
+    fun hasTag(intent: Intent?): Boolean = intent?.let(::tagFromIntent) != null
+
+    /**
+     * Allows the write flow to receive the same physical tag again immediately
+     * after the user has selected a write mode.
+     */
+    fun resetDuplicateDetection() {
+        synchronized(lock) {
+            lastTagKey = null
+            lastUnlockCommand = false
+            lastDiscoveredAt = 0L
+        }
+        Log.i(TAG, "duplicate detection reset for NFC write")
+    }
+
     /** Handles an NFC intent delivered to MainActivity by foreground dispatch. */
     fun handleIntent(intent: Intent?) {
         val action = intent?.action ?: return
-        if (action !in NFC_INTENT_ACTIONS) return
-        val tag = tagFromIntent(intent) ?: return
         val messageFromDispatch = NfcCommand.messageFromIntent(intent)
+        val tag = tagFromIntent(intent)
+        // AAR dispatch on some OEM builds can launch the package's launcher
+        // activity instead of preserving ACTION_NDEF_DISCOVERED. Accept the
+        // fallback only when the system supplied a real NFC Tag object.
+        if (action !in NFC_INTENT_ACTIONS && tag == null) return
+        if (tag == null) {
+            Log.w(TAG, "NFC intent had no Tag action=$action")
+            return
+        }
+        Log.i(
+            TAG,
+            "NFC intent received action=$action tech=${tag.techList.joinToString()} " +
+                "dispatchRecords=${messageFromDispatch?.records?.size ?: 0}",
+        )
         if (messageFromDispatch != null) {
             processTag(tag, messageFromDispatch, ndefReadSucceeded = true)
         } else {
@@ -124,6 +151,11 @@ class NfcTagReader(
             // so read the tag on IO before deciding whether it is an unlock tag.
             ioScope.launch {
                 val readResult = NfcCommand.readMessage(tag)
+                readResult.onSuccess { message ->
+                    Log.i(TAG, "NFC NDEF read completed records=${message?.records?.size ?: 0}")
+                }.onFailure { error ->
+                    Log.e(TAG, "NFC NDEF read failed: ${error.javaClass.simpleName}", error)
+                }
                 processTag(tag, readResult.getOrNull(), readResult.isSuccess)
             }
         }
@@ -143,12 +175,18 @@ class NfcTagReader(
                 isUnlockCommand == lastUnlockCommand &&
                 now - lastDiscoveredAt < duplicateWindowMs
             ) {
+                Log.i(TAG, "duplicate NFC event ignored unlock=$isUnlockCommand")
                 return
             }
             lastTagKey = tagKey
             lastUnlockCommand = isUnlockCommand
             lastDiscoveredAt = now
         }
+        Log.i(
+            TAG,
+            "NFC tag event emitted unlock=$isUnlockCommand " +
+                "readSucceeded=$ndefReadSucceeded records=${ndefMessage?.records?.size ?: 0}",
+        )
         eventsChannel.trySend(NfcTagEvent(tag, ndefMessage, ndefReadSucceeded))
     }
 
@@ -172,6 +210,7 @@ class NfcTagReader(
     }
 
     private companion object {
+        const val TAG = "EasyOpenNfcReader"
         const val DEFAULT_DUPLICATE_WINDOW_MS = 2_000L
     }
 }

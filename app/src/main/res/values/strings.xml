@@ -150,6 +150,8 @@
     <string name="nfc_write_choice_empty">未检测到标签原有内容，将直接写入 EasyOpen 开门内容。</string>
     <string name="nfc_write_without_original">不保留，直接写入</string>
     <string name="nfc_write_preserve_original">保留并合并</string>
+    <string name="nfc_write_reconnect_title">重新贴近 NFC 标签</string>
+    <string name="nfc_write_reconnect_description">写入选项已确认。请先移开手机，再重新贴近要写入的 NFC 标签；检测到后将立即写入，请保持贴近直到完成。</string>
     <string name="nfc_write_in_progress_title">正在写入 NFC 标签</string>
     <string name="nfc_write_in_progress_description">请保持手机靠近 NFC 标签，写入完成前不要移开。</string>
     <string name="nfc_write_success">NFC 标签写入成功，现在可以碰一碰自动开门</string>

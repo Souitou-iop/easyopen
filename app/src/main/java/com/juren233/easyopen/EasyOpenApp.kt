@@ -21,6 +21,7 @@ internal fun EasyOpenApp(
     permissionsGranted: Boolean,
     onRequestPermissions: () -> Unit,
     onOpenBluetoothSettings: () -> Unit,
+    onNfcWriteTagReset: () -> Unit,
     nfcEvents: Flow<NfcTagEvent>,
     nfcReaderState: StateFlow<NfcReaderState>,
 ) {
@@ -45,6 +46,7 @@ internal fun EasyOpenApp(
             },
             onRequestPermissions = onRequestPermissions,
             onOpenBluetoothSettings = onOpenBluetoothSettings,
+            onNfcWriteTagReset = onNfcWriteTagReset,
             nfcEvents = nfcEvents,
             nfcReaderState = nfcReaderState,
         )

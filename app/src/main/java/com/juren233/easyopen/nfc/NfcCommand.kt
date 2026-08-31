@@ -12,15 +12,26 @@ import java.nio.charset.StandardCharsets
 /** The application-owned NDEF command understood by EasyOpen. */
 object NfcCommand {
     // This must belong to EasyOpen, not to the original YILA package.
+    const val APPLICATION_ID = "com.juren233.easyopen"
     const val MIME_TYPE = "application/com.juren233.easyopen.unlock"
     const val PAYLOAD_TEXT = "unlock_current=1"
+    private const val AAR_TYPE = "android.com:pkg"
 
     val payload: ByteArray
         get() = PAYLOAD_TEXT.toByteArray(StandardCharsets.UTF_8)
 
     fun createRecord(): NdefRecord = NdefRecord.createMime(MIME_TYPE, payload)
 
-    fun createMessage(): NdefMessage = NdefMessage(arrayOf(createRecord()))
+    /**
+     * Pins Android tag dispatch to EasyOpen's package while the MIME record
+     * remains first so that the system still resolves the transparent
+     * NfcEntryActivity rather than the launcher activity.
+     */
+    fun createApplicationRecord(): NdefRecord =
+        NdefRecord.createApplicationRecord(APPLICATION_ID)
+
+    fun createMessage(): NdefMessage =
+        NdefMessage(arrayOf(createRecord(), createApplicationRecord()))
 
     /**
      * Keeps every original record and puts one EasyOpen record first. Android
@@ -29,14 +40,15 @@ object NfcCommand {
      */
     fun messageForWrite(original: NdefMessage?, preserveOriginal: Boolean): NdefMessage {
         if (!preserveOriginal || original == null) return createMessage()
-        val records = listOf(createRecord()) + original.records.filterNot(::isUnlockRecord)
+        val records = listOf(createRecord(), createApplicationRecord()) +
+            original.records.filterNot {
+                isUnlockRecord(it) || isEasyOpenApplicationRecord(it)
+            }
         return NdefMessage(records.toTypedArray())
     }
 
-    fun isUnlockIntent(intent: Intent?): Boolean {
-        if (intent?.action != NfcAdapter.ACTION_NDEF_DISCOVERED) return false
-        return messageFromIntent(intent)?.records?.any(::isUnlockRecord) == true
-    }
+    fun isUnlockIntent(intent: Intent?): Boolean =
+        messageFromIntent(intent)?.records?.any(::isUnlockRecord) == true
 
     /** Returns the first NDEF message supplied by Android's NFC dispatch. */
     fun messageFromIntent(intent: Intent?): NdefMessage? {
@@ -66,6 +78,18 @@ object NfcCommand {
 
     fun isUnlockRecord(record: NdefRecord): Boolean =
         isUnlockMimeRecord(record.tnf, record.type)
+
+    fun isEasyOpenApplicationRecord(record: NdefRecord): Boolean =
+        isEasyOpenApplicationRecord(record.tnf, record.type, record.payload)
+
+    fun isEasyOpenApplicationRecord(
+        tnf: Short,
+        type: ByteArray,
+        payload: ByteArray,
+    ): Boolean =
+        tnf == NdefRecord.TNF_EXTERNAL_TYPE &&
+            type.toString(StandardCharsets.US_ASCII).equals(AAR_TYPE, ignoreCase = true) &&
+            payload.toString(StandardCharsets.UTF_8) == APPLICATION_ID
 
     fun isUnlockMimeRecord(tnf: Short, type: ByteArray): Boolean {
         if (tnf != NdefRecord.TNF_MIME_MEDIA) return false

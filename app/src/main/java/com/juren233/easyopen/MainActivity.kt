@@ -6,6 +6,7 @@ import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
+import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.compose.setContent
@@ -42,6 +43,12 @@ class MainActivity : ComponentActivity() {
         controller = BleDoorController(this)
         nfcReader = NfcTagReader(this)
         permissionsGranted = controller.hasBluetoothPermission()
+        Log.i(
+            TAG,
+            "onCreate action=${intent?.action} hasTag=${nfcReader.hasTag(intent)} " +
+                "dispatchRecords=${com.juren233.easyopen.nfc.NfcCommand.messageFromIntent(intent)?.records?.size ?: 0}",
+        )
+        nfcReader.handleIntent(intent)
         setContent {
             EasyOpenApp(
                 controller = controller,
@@ -50,6 +57,7 @@ class MainActivity : ComponentActivity() {
                 onOpenBluetoothSettings = {
                     startActivity(Intent(Settings.ACTION_BLUETOOTH_SETTINGS))
                 },
+                onNfcWriteTagReset = nfcReader::resetDuplicateDetection,
                 nfcEvents = nfcReader.events,
                 nfcReaderState = nfcReader.state,
             )
@@ -59,6 +67,11 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
+        Log.i(
+            TAG,
+            "onNewIntent action=${intent.action} hasTag=${nfcReader.hasTag(intent)} " +
+                "dispatchRecords=${com.juren233.easyopen.nfc.NfcCommand.messageFromIntent(intent)?.records?.size ?: 0}",
+        )
         nfcReader.handleIntent(intent)
     }
 
@@ -106,5 +119,8 @@ class MainActivity : ComponentActivity() {
         controller.disconnect()
         super.onDestroy()
     }
-}
 
+    private companion object {
+        const val TAG = "EasyOpenMainActivity"
+    }
+}

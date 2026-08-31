@@ -23,6 +23,24 @@ class NfcCommandTest {
     }
 
     @Test
+    fun recognizesEasyOpenApplicationRecordByExactPackage() {
+        assertTrue(
+            NfcCommand.isEasyOpenApplicationRecord(
+                android.nfc.NdefRecord.TNF_EXTERNAL_TYPE,
+                "android.com:pkg".toByteArray(StandardCharsets.US_ASCII),
+                NfcCommand.APPLICATION_ID.toByteArray(StandardCharsets.UTF_8),
+            ),
+        )
+        assertFalse(
+            NfcCommand.isEasyOpenApplicationRecord(
+                android.nfc.NdefRecord.TNF_EXTERNAL_TYPE,
+                "android.com:pkg".toByteArray(StandardCharsets.US_ASCII),
+                "com.example.other".toByteArray(StandardCharsets.UTF_8),
+            ),
+        )
+    }
+
+    @Test
     fun recognizesOnlyTheApplicationSpecificMimeRecord() {
         assertTrue(
             NfcCommand.isUnlockMimeRecord(

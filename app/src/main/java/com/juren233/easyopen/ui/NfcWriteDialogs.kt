@@ -23,6 +23,7 @@ import top.yukonga.miuix.kmp.window.WindowDialog
 internal fun NfcWriteDialogs(
     waiting: Boolean,
     request: NfcWriteRequest?,
+    awaitingTag: Boolean,
     writing: Boolean,
     onChoice: (Boolean) -> Unit,
     onCancel: () -> Unit,
@@ -44,7 +45,24 @@ internal fun NfcWriteDialogs(
         }
     }
 
-    request?.let { writeRequest ->
+    if (awaitingTag) {
+        WindowDialog(
+            title = stringResource(R.string.nfc_write_reconnect_title),
+            show = true,
+            onDismissRequest = onCancel,
+        ) {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                MiuixText(text = stringResource(R.string.nfc_write_reconnect_description))
+                MiuixTextButton(
+                    text = stringResource(R.string.cancel),
+                    onClick = onCancel,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+        }
+    }
+
+    if (!awaitingTag) request?.let { writeRequest ->
         val originalRecordCount = writeRequest.originalMessage?.records?.size ?: 0
         WindowDialog(
             title = stringResource(R.string.nfc_write_choice_title),
