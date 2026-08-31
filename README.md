@@ -15,13 +15,13 @@
   <a href="https://developer.mozilla.org/docs/Web/API/Web_Bluetooth_API"><img src="https://img.shields.io/badge/Web-Bluetooth-0F172A.svg" alt="Web Bluetooth" /></a>
 </p>
 
----
+***
 
 ## 项目简介
 
-EasyOpen 是一个面向 YILA 开门器的本地控制工具，提供 **Android 原生应用** 和 **Web Bluetooth 网页版** 两种形态。
+EasyOpen 是一个面向 YILA 开门器的本地控制工具，提供 **Android 原生应用** 和 **Web Bluetooth 网页版** （不再维护）两种形态。
 
-项目只实现本地 BLE 开门主链路，不依赖登录、云端、MQTT、网关或远程开门服务。Android 端使用 Jetpack Compose 与 Miuix 构建界面，网页端可以直接在支持 Web Bluetooth 的浏览器中使用。
+项目只实现本地 BLE 开门主链路，不依赖登录、云端、MQTT、网关或远程开门服务。
 
 ## 主要功能
 
@@ -77,7 +77,7 @@ app/build/outputs/apk/release/app-release.apk
 
 Debug 和 Release 默认使用项目的同一份正式签名。签名私钥只保存在本地的 `signing/easyopen-release.jks`，不应提交到仓库；首次克隆项目时，请按 [`keystore.properties.example`](keystore.properties.example) 创建本地 `keystore.properties`。
 
-## Web Bluetooth 版
+## Web Bluetooth 版（不再维护）
 
 网页版本位于 [`web/`](web/)，不需要安装 APK。浏览器必须支持 Web Bluetooth；正式部署建议使用 HTTPS，本地开发可使用 `localhost`。
 
@@ -134,11 +134,12 @@ ARCHITECTURE.md              Android 端代码组织说明
 
 本项目当前直接使用的主要第三方组件如下。第三方组件不受本项目 CC BY-NC 4.0 声明覆盖，仍按其各自许可证执行：
 
-| 组件 | 用途 | 许可证 | 上游许可证/项目 |
-| :--- | :--- | :--- | :--- |
-| AndroidX、Jetpack Compose、Navigation 3 | Android 基础能力、UI 与导航 | Apache-2.0 | [androidx/androidx](https://github.com/androidx/androidx/blob/androidx-main/LICENSE.txt) |
-| Kotlin Standard Library | Kotlin 运行时 | Apache-2.0 | [JetBrains/kotlin](https://github.com/JetBrains/kotlin/blob/master/license/LICENSE.txt) |
-| kotlinx.serialization | 分享/备份数据序列化 | Apache-2.0 | [Kotlin/kotlinx.serialization](https://github.com/Kotlin/kotlinx.serialization/blob/master/LICENSE.txt) |
-| Miuix | Android 界面组件与主题 | Apache-2.0 | [compose-miuix-ui/miuix](https://github.com/compose-miuix-ui/miuix/blob/main/LICENSE) |
-| ZXing Core | 二维码编码/解码核心 | Apache-2.0 | [zxing/zxing](https://github.com/zxing/zxing/blob/master/LICENSE) |
-| ZXing Android Embedded | Android 相机扫码集成 | Apache-2.0 | [journeyapps/zxing-android-embedded](https://github.com/journeyapps/zxing-android-embedded/blob/master/COPYING) |
+| 组件                                    | 用途                  | 许可证        | 上游许可证/项目                                                                                                        |
+| :------------------------------------ | :------------------ | :--------- | :-------------------------------------------------------------------------------------------------------------- |
+| AndroidX、Jetpack Compose、Navigation 3 | Android 基础能力、UI 与导航 | Apache-2.0 | [androidx/androidx](https://github.com/androidx/androidx/blob/androidx-main/LICENSE.txt)                        |
+| Kotlin Standard Library               | Kotlin 运行时          | Apache-2.0 | [JetBrains/kotlin](https://github.com/JetBrains/kotlin/blob/master/license/LICENSE.txt)                         |
+| kotlinx.serialization                 | 分享/备份数据序列化          | Apache-2.0 | [Kotlin/kotlinx.serialization](https://github.com/Kotlin/kotlinx.serialization/blob/master/LICENSE.txt)         |
+| Miuix                                 | Android 界面组件与主题     | Apache-2.0 | [compose-miuix-ui/miuix](https://github.com/compose-miuix-ui/miuix/blob/main/LICENSE)                           |
+| ZXing Core                            | 二维码编码/解码核心          | Apache-2.0 | [zxing/zxing](https://github.com/zxing/zxing/blob/master/LICENSE)                                               |
+| ZXing Android Embedded                | Android 相机扫码集成      | Apache-2.0 | [journeyapps/zxing-android-embedded](https://github.com/journeyapps/zxing-android-embedded/blob/master/COPYING) |
+
