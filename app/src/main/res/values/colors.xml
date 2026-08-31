@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Static fallback for Android versions without Monet system palette resources. -->
+    <color name="ic_launcher_background">#FF70B5E6</color>
+    <color name="ic_launcher_foreground">#FFFFFDFC</color>
+</resources>

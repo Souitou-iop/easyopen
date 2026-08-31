@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#0c0f12" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="description" content="EasyOpen 本地 BLE 开门器控制" />
+  <title>EasyOpen | 本地蓝牙控制</title>
+  <link rel="manifest" href="./manifest.webmanifest" />
+  <link rel="icon" type="image/svg+xml" href="./icons/easyopen-app-icon.svg" />
+  <link rel="alternate icon" type="image/png" href="./icons/icon-192.png" />
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <div class="page-noise" aria-hidden="true"></div>
+  <main class="page-shell">
+    <header class="topbar">
+      <div class="brand-block">
+        <a class="brand-lockup" href="./index.html" aria-label="EasyOpen 首页">
+          <img src="./icons/easyopen-app-icon.svg" alt="" width="32" height="32" />
+          <span>EasyOpen</span>
+        </a>
+        <span class="brand-meta">LOCAL BLE ACCESS</span>
+      </div>
+      <span id="secure-badge" class="status-pill">检查环境…</span>
+    </header>
+
+    <section class="content-grid" aria-label="EasyOpen 本地控制">
+      <section class="hero-card" id="control-panel">
+        <div class="hero-copy">
+          <p class="eyebrow">本地蓝牙控制</p>
+          <h1 id="hero-title">准备开启</h1>
+          <p id="hero-subtitle">选择已配对的设备，浏览器会在本地发送一次性指令。</p>
+        </div>
+
+        <div class="hero-media">
+          <img src="./assets/hero-door.jpg" alt="现代住宅中的黑色玻璃门与室内空间" width="1600" height="1088" />
+        </div>
+
+        <div class="hero-control">
+          <button id="unlock-button" class="unlock-button" disabled>
+            <span id="unlock-label">开门</span>
+            <span class="unlock-subtitle">发送安全指令</span>
+          </button>
+          <p id="state-text" class="state-text">尚未连接</p>
+        </div>
+      </section>
+
+      <div class="side-column">
+        <section class="card device-card">
+          <div class="card-heading">
+            <div>
+              <h2 id="device-name">未选择设备</h2>
+              <p id="device-id" class="muted">点击“选择设备”开始</p>
+            </div>
+            <div class="connection-status">
+              <span id="connection-dot" class="connection-dot" aria-hidden="true"></span>
+              <span>连接状态</span>
+            </div>
+          </div>
+          <div class="button-row">
+            <button id="select-button" class="primary-button">选择设备</button>
+            <button id="reconnect-button" class="secondary-button" disabled>重新连接</button>
+          </div>
+        </section>
+
+        <section class="card settings-card">
+          <div class="card-heading compact">
+            <div>
+              <h2>保持原版协议</h2>
+            </div>
+            <span class="local-only">本机处理</span>
+          </div>
+          <div class="field-grid">
+            <label>开门器密码<input id="password" type="password" autocomplete="off" placeholder="输入原版密码" /></label>
+            <label>动作方向<select id="attribute"><option value="0">正向 +</option><option value="1">反向 -</option></select></label>
+            <label>开启 ms<input id="open-time" inputmode="numeric" value="650" /></label>
+            <label>保持 ms<input id="wait-time" inputmode="numeric" value="2000" /></label>
+            <label>关闭 ms<input id="close-time" inputmode="numeric" value="600" /></label>
+          </div>
+          <p class="hint">密码不会写入本地存储。页面刷新后需要重新输入。</p>
+        </section>
+
+        <section class="card compatibility-card">
+          <div class="card-heading compact">
+            <div>
+              <h2>三件事就绪即可</h2>
+            </div>
+          </div>
+          <ul>
+            <li>使用 Android Chrome，手机蓝牙已开启。</li>
+            <li>通过 HTTPS 打开页面，本机开发可使用 localhost。</li>
+            <li>扫描、连接和开门都需要由点击操作触发。</li>
+          </ul>
+          <details>
+            <summary>查看协议状态</summary>
+            <pre id="diagnostic-output">等待连接…</pre>
+          </details>
+        </section>
+      </div>
+    </section>
+
+    <footer class="page-footer">
+      <span>EasyOpen Web</span>
+      <span>本地 BLE · 不包含远程开门</span>
+    </footer>
+  </main>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script defer src="./app.js"></script>
+</body>
+</html>

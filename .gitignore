@@ -1,0 +1,22 @@
+.gradle/
+build/
+**/build/
+local.properties
+extracted/base.apk
+extracted/classes.dex
+extracted/jadx/
+extracted/single/
+extracted/device-verify/*.apk
+DEBUGGING_MISTAKES.md
+
+# Local release signing material; configure GitHub Actions with the matching secrets.
+keystore.properties
+signing/*.jks
+signing/*.keystore
+
+# Local reverse-engineering/device verification metadata
+extracted/device-apk-path.txt
+extracted/device-verify/installed-path.txt
+extracted/jadx.log
+extracted/manifest-tree.txt
+extracted/single.log

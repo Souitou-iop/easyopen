@@ -1,0 +1,252 @@
+name: Android Build & Release
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: android-build-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: 拉取代码 Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: 版本检测 Version Gate
+        id: gate
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+
+          while IFS= read -r line; do
+            echo "$line" >> "$GITHUB_OUTPUT"
+          done < <(bash .github/scripts/resolve-version.sh)
+
+          current_name="$(sed -nE 's/^[[:space:]]*versionName[[:space:]]*=.*"([^"]+)".*/\1/p' app/build.gradle.kts | head -n1)"
+          current_code="$(sed -nE 's/^[[:space:]]*versionCode[[:space:]]*=*[[:space:]]*([0-9]+).*/\1/p' app/build.gradle.kts | head -n1)"
+
+          if [[ "$EVENT_NAME" == "pull_request" || "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "${EVENT_NAME} trigger, proceeding with resolved version"
+          elif [[ "$current_name" =~ -(beta|canary)$ ]]; then
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "${BASH_REMATCH[1]} channel commit detected, proceeding"
+          elif git rev-parse HEAD^ >/dev/null 2>&1; then
+            previous_name="$(git show HEAD^:app/build.gradle.kts 2>/dev/null | sed -nE 's/^[[:space:]]*versionName[[:space:]]*=.*"([^"]+)".*/\1/p' | head -n1 || true)"
+            previous_code="$(git show HEAD^:app/build.gradle.kts 2>/dev/null | sed -nE 's/^[[:space:]]*versionCode[[:space:]]*=*[[:space:]]*([0-9]+).*/\1/p' | head -n1 || true)"
+
+            if [[ "$current_name" != "$previous_name" || "$current_code" != "$previous_code" ]]; then
+              echo "skip=false" >> "$GITHUB_OUTPUT"
+              echo "version changed (Name: $previous_name -> $current_name, Code: $previous_code -> $current_code), proceeding"
+            else
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              echo "stable version unchanged (Name: $current_name, Code: $current_code), skipping build"
+            fi
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 安装 JDK Setup Java
+        if: steps.gate.outputs.skip != 'true'
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: 安装 Android SDK Setup Android SDK
+        if: steps.gate.outputs.skip != 'true'
+        uses: android-actions/setup-android@v4
+        with:
+          packages: platform-tools platforms;android-37 build-tools;37.0.0
+
+      - name: 配置 Gradle Setup Gradle
+        if: steps.gate.outputs.skip != 'true'
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: wrapper
+          cache-read-only: ${{ github.event_name == 'pull_request' }}
+
+      - name: 授权脚本 Grant Permission
+        if: steps.gate.outputs.skip != 'true'
+        run: chmod +x gradlew .github/scripts/resolve-version.sh .github/scripts/generate-release-body.sh
+
+      - name: 配置正式签名密钥 Configure Release Signing
+        if: github.event_name != 'pull_request' && steps.gate.outputs.skip == 'false'
+        env:
+          SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "$SIGNING_KEY"
+          printf '%s' "$SIGNING_KEY" | base64 --decode > "$RUNNER_TEMP/easyopen-release.jks"
+          chmod 600 "$RUNNER_TEMP/easyopen-release.jks"
+
+      - name: 构建 Debug 或 Release Build
+        if: steps.gate.outputs.skip != 'true'
+        env:
+          CHANNEL: ${{ steps.gate.outputs.channel }}
+          FULL_NAME: ${{ steps.gate.outputs.full_name }}
+          EVENT_NAME: ${{ github.event_name }}
+          RELEASE_STORE_FILE: ${{ runner.temp }}/easyopen-release.jks
+          RELEASE_STORE_PASSWORD: ${{ secrets.KEY_STORE_PASSWORD }}
+          RELEASE_KEY_ALIAS: ${{ secrets.ALIAS }}
+          RELEASE_KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          gradle_args=(--no-daemon --max-workers=2 --build-cache -PciVersionName="$FULL_NAME")
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            # Fork PRs cannot access repository signing secrets. Keep their validation
+            # build explicitly unsigned; every published/action build uses the release key.
+            gradle_args+=(-PallowUnsigned=true)
+          fi
+
+          tasks=( :app:assembleDebug )
+          if [[ "$CHANNEL" == "stable" ]]; then
+            tasks+=( :app:assembleRelease )
+          fi
+          ./gradlew "${gradle_args[@]}" "${tasks[@]}"
+
+          DEBUG_IN=$(find app/build/outputs/apk/debug -maxdepth 1 -type f -name '*.apk' -print -quit)
+          test -n "$DEBUG_IN"
+          cp "$DEBUG_IN" "EasyOpen-debug-v${FULL_NAME}-${{ steps.gate.outputs.code }}.apk"
+
+          if [[ "$CHANNEL" == "stable" ]]; then
+            RELEASE_IN=$(find app/build/outputs/apk/release -maxdepth 1 -type f -name '*.apk' -print -quit)
+            test -n "$RELEASE_IN"
+            cp "$RELEASE_IN" "EasyOpen-release-v${FULL_NAME}-${{ steps.gate.outputs.code }}.apk"
+          fi
+
+      - name: 验证 APK 签名 Verify APK Signatures
+        if: steps.gate.outputs.skip == 'false'
+        env:
+          CHANNEL: ${{ steps.gate.outputs.channel }}
+          FULL_NAME: ${{ steps.gate.outputs.full_name }}
+          EVENT_NAME: ${{ github.event_name }}
+          V_CODE: ${{ steps.gate.outputs.code }}
+        run: |
+          set -euo pipefail
+
+          APKSIGNER="$ANDROID_SDK_ROOT/build-tools/37.0.0/apksigner"
+          DEBUG_APK="EasyOpen-debug-v${FULL_NAME}-${V_CODE}.apk"
+          "$APKSIGNER" verify --verbose "$DEBUG_APK"
+
+          if [[ "$CHANNEL" == "stable" ]]; then
+            RELEASE_APK="EasyOpen-release-v${FULL_NAME}-${V_CODE}.apk"
+            "$APKSIGNER" verify --verbose "$RELEASE_APK"
+          fi
+
+          if [[ "$EVENT_NAME" != "pull_request" ]]; then
+            expected="$(tr -d '[:space:]' < signing/easyopen-release-cert.sha256 | tr -d ':' | tr '[:upper:]' '[:lower:]')"
+            actual="$("$APKSIGNER" verify --print-certs "$DEBUG_APK" | sed -n 's/.*SHA-256 digest: //p' | head -n1 | tr -d ':' | tr '[:upper:]' '[:lower:]')"
+            test -n "$actual"
+            test "$actual" = "$expected"
+            if [[ "$CHANNEL" == "stable" ]]; then
+              actual_release="$("$APKSIGNER" verify --print-certs "EasyOpen-release-v${FULL_NAME}-${V_CODE}.apk" | sed -n 's/.*SHA-256 digest: //p' | head -n1 | tr -d ':' | tr '[:upper:]' '[:lower:]')"
+              test "$actual_release" = "$expected"
+            fi
+          fi
+
+      - name: 上传 PR 构建产物 Upload PR Artifacts
+        if: github.event_name == 'pull_request' && steps.gate.outputs.skip == 'false'
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.gate.outputs.channel }}-debug-v${{ steps.gate.outputs.full_name }}-${{ steps.gate.outputs.code }}
+          path: EasyOpen-*-v${{ steps.gate.outputs.full_name }}-${{ steps.gate.outputs.code }}.apk
+          if-no-files-found: error
+
+      - name: 上传 Canary 构建产物 Upload Canary Artifact
+        if: github.event_name != 'pull_request' && steps.gate.outputs.skip == 'false' && steps.gate.outputs.channel == 'canary'
+        uses: actions/upload-artifact@v7
+        with:
+          name: canary-debug-v${{ steps.gate.outputs.full_name }}-${{ steps.gate.outputs.code }}
+          path: EasyOpen-debug-v${{ steps.gate.outputs.full_name }}-${{ steps.gate.outputs.code }}.apk
+          if-no-files-found: error
+
+      - name: 创建 Canary 标签 Create Canary Tag
+        if: github.event_name != 'pull_request' && steps.gate.outputs.skip == 'false' && steps.gate.outputs.channel == 'canary'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FULL_TAG: ${{ steps.gate.outputs.full_tag }}
+          FULL_NAME: ${{ steps.gate.outputs.full_name }}
+          COMMIT_SHA: ${{ github.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          if git show-ref --verify --quiet "refs/tags/$FULL_TAG"; then
+            existing_sha="$(git rev-list -n1 "$FULL_TAG")"
+            if [[ "$existing_sha" != "$COMMIT_SHA" ]]; then
+              echo "Tag $FULL_TAG already exists at $existing_sha, expected $COMMIT_SHA" >&2
+              exit 1
+            fi
+            echo "Tag $FULL_TAG already points to $COMMIT_SHA; keeping it."
+            exit 0
+          fi
+
+          git tag -a "$FULL_TAG" "$COMMIT_SHA" \
+            -m "Canary ${FULL_NAME}" \
+            -m "对应 GitHub Actions：${RUN_URL}"
+          git push origin "$FULL_TAG"
+
+      - name: 生成发布说明 Generate Release Body
+        if: github.event_name != 'pull_request' && steps.gate.outputs.skip == 'false' && (steps.gate.outputs.channel == 'stable' || steps.gate.outputs.channel == 'beta')
+        id: release_body
+        run: |
+          set -euo pipefail
+
+          PREV_TAG="${{ steps.gate.outputs.prev_stable_tag }}"
+          CHANNEL="${{ steps.gate.outputs.channel }}"
+          BODY_DELIMITER="release_body_$(git rev-parse HEAD)"
+          echo "body<<$BODY_DELIMITER" >> "$GITHUB_OUTPUT"
+          .github/scripts/generate-release-body.sh "$PREV_TAG" HEAD "$CHANNEL" >> "$GITHUB_OUTPUT"
+          echo "$BODY_DELIMITER" >> "$GITHUB_OUTPUT"
+
+      - name: 创建正式版发布 Create Stable Release
+        if: github.event_name != 'pull_request' && steps.gate.outputs.skip == 'false' && steps.gate.outputs.channel == 'stable'
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: v${{ steps.gate.outputs.full_name }}
+          target_commitish: ${{ github.sha }}
+          name: v${{ steps.gate.outputs.full_name }}
+          body: ${{ steps.release_body.outputs.body }}
+          draft: false
+          prerelease: false
+          generate_release_notes: false
+          files: |
+            EasyOpen-debug-v${{ steps.gate.outputs.full_name }}-${{ steps.gate.outputs.code }}.apk
+            EasyOpen-release-v${{ steps.gate.outputs.full_name }}-${{ steps.gate.outputs.code }}.apk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 创建 Beta Pre-release
+        if: github.event_name != 'pull_request' && steps.gate.outputs.skip == 'false' && steps.gate.outputs.channel == 'beta'
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: v${{ steps.gate.outputs.full_name }}
+          target_commitish: ${{ github.sha }}
+          name: v${{ steps.gate.outputs.full_name }}
+          body: ${{ steps.release_body.outputs.body }}
+          draft: false
+          prerelease: true
+          generate_release_notes: false
+          files: EasyOpen-debug-v${{ steps.gate.outputs.full_name }}-${{ steps.gate.outputs.code }}.apk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
