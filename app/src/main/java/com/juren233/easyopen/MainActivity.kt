@@ -94,6 +94,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onStart() {
         super.onStart()
+        controller.enterForeground()
         updateCheckJob?.cancel()
         updateCheckJob = updateCheckScope.launch {
             UpdateData.refresh(
@@ -111,6 +112,11 @@ class MainActivity : ComponentActivity() {
     override fun onPause() {
         nfcReader.onPause()
         super.onPause()
+    }
+
+    override fun onStop() {
+        controller.enterBackground()
+        super.onStop()
     }
 
     override fun onDestroy() {

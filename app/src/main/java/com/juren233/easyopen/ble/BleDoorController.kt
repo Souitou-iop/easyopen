@@ -20,6 +20,7 @@ import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.util.Log
 import androidx.core.content.ContextCompat
 import com.juren233.easyopen.BuildConfig
@@ -65,6 +66,8 @@ class BleDoorController(context: Context) {
         private const val SCAN_RESTART_DELAY_MS = 350L
         private const val PRESENCE_SCAN_WINDOW_MS = 8_000L
         private const val GATT_CONNECTION_TIMEOUT_MS = 8_000L
+        /** Keep a foreground preheat link briefly across a transient app switch, then release it. */
+        private const val BACKGROUND_RELEASE_GRACE_MS = 3_000L
 
         /** The original app accepts local openers whose advertised name contains YILA, except remotes. */
         fun isYiLaOpenerName(name: String): Boolean {
@@ -81,6 +84,22 @@ class BleDoorController(context: Context) {
     private val adapter: BluetoothAdapter?
         get() = bluetoothManager?.adapter
     private val mainHandler = Handler(Looper.getMainLooper())
+
+    /** The controller starts in the foreground; MainActivity updates this at lifecycle boundaries. */
+    private var appInForeground = true
+    private var backgroundRelease: Runnable? = null
+    private var timingSequence = 0L
+    private var timingId = 0L
+    private var timingStartedAtMs = 0L
+    private var connectionPurpose = ConnectionPurpose.NONE
+
+    private enum class ConnectionPurpose {
+        NONE,
+        PREHEAT,
+        EXPLICIT_CONNECT,
+        UNLOCK,
+        PAIRING,
+    }
 
     private val _state = MutableStateFlow<BleState>(BleState.Idle)
     val state: StateFlow<BleState> = _state.asStateFlow()
@@ -133,6 +152,32 @@ class BleDoorController(context: Context) {
     private var writeRetryCount = 0
     private var descriptorRetry: Runnable? = null
     private var descriptorRetryCount = 0
+
+    private fun timingElapsedMs(): Long =
+        if (timingStartedAtMs == 0L) 0L else SystemClock.elapsedRealtime() - timingStartedAtMs
+
+    private fun logTiming(stage: String, details: String = "") {
+        if (!BuildConfig.DEBUG || timingId == 0L) return
+        val suffix = details.takeIf(String::isNotBlank)?.let { " $it" }.orEmpty()
+        Log.d(
+            TAG,
+            "BLE_TIMING id=$timingId purpose=${connectionPurpose.name.lowercase()} " +
+                "stage=$stage elapsedMs=${timingElapsedMs()} address=${currentAddress ?: "unknown"}$suffix",
+        )
+    }
+
+    private fun beginTiming(purpose: ConnectionPurpose, address: String) {
+        timingId = ++timingSequence
+        timingStartedAtMs = SystemClock.elapsedRealtime()
+        connectionPurpose = purpose
+        if (BuildConfig.DEBUG) {
+            Log.d(
+                TAG,
+                "BLE_TIMING id=$timingId purpose=${purpose.name.lowercase()} " +
+                    "stage=begin elapsedMs=0 address=${address.trim().uppercase()} pid=${android.os.Process.myPid()}",
+            )
+        }
+    }
 
     private sealed interface PendingOperation {
         data object None : PendingOperation
@@ -259,6 +304,64 @@ class BleDoorController(context: Context) {
             .ifBlank { result.scanRecord?.deviceName.orEmpty() }
     }
 
+    private fun scheduleBackgroundRelease(reason: String) {
+        if (appInForeground || pendingOperation !is PendingOperation.None) return
+        backgroundRelease?.let(mainHandler::removeCallbacks)
+        backgroundRelease = Runnable {
+            backgroundRelease = null
+            if (!appInForeground && pendingOperation is PendingOperation.None) {
+                releaseIdleConnection(reason)
+            }
+        }.also { mainHandler.postDelayed(it, BACKGROUND_RELEASE_GRACE_MS) }
+    }
+
+    /**
+     * Marks the UI as visible and resumes foreground preheating for the home page.
+     * The monitor itself is restored by the existing Home navigation effect.
+     */
+    @SuppressLint("MissingPermission")
+    fun enterForeground() {
+        appInForeground = true
+        backgroundRelease?.let(mainHandler::removeCallbacks)
+        backgroundRelease = null
+        if (BuildConfig.DEBUG) Log.d(TAG, "BLE_LIFECYCLE state=foreground")
+        if (presenceMonitoringActive) {
+            val address = presenceProfile?.address.orEmpty().uppercase()
+            val link = _connectionState.value
+            if (link is BleConnectionState.Connected && link.address.equals(address, ignoreCase = true)) {
+                publishOpenerConnection(OpenerConnectionStatus.CONNECTED, address)
+            } else {
+                publishOpenerConnection(OpenerConnectionStatus.NOT_FOUND, address)
+                startPresenceScanWindow()
+            }
+        }
+    }
+
+    /**
+     * Stops background scanning/reconnect attempts. An idle preheat link gets a
+     * short grace period so a transient app switch does not throw away warm-up,
+     * but it cannot remain an indefinite owner of the opener.
+     */
+    @SuppressLint("MissingPermission")
+    fun enterBackground() {
+        appInForeground = false
+        if (BuildConfig.DEBUG) {
+            Log.d(
+                TAG,
+                "BLE_LIFECYCLE state=background pending=${pendingOperation::class.simpleName} " +
+                    "connection=${_connectionState.value::class.simpleName}",
+            )
+        }
+        presenceScanRestart?.let(mainHandler::removeCallbacks)
+        presenceScanRestart = null
+        stopPresenceScanWindow()
+        if (pendingOperation is PendingOperation.None) {
+            scheduleBackgroundRelease("background_idle")
+        } else if (BuildConfig.DEBUG) {
+            Log.d(TAG, "BLE_LIFECYCLE background_keeps_active_operation=true")
+        }
+    }
+
     /**
      * Keeps looking for the active opener while the home page is visible.
      *
@@ -272,6 +375,8 @@ class BleDoorController(context: Context) {
         autoConnectEnabled: Boolean = true,
         autoConnectRssiThreshold: Int = OpenerConnectionPolicy.AUTO_CONNECT_RSSI_THRESHOLD,
     ) {
+        backgroundRelease?.let(mainHandler::removeCallbacks)
+        backgroundRelease = null
         val address = profile.address.trim().uppercase()
         stopScan()
         stopBatteryScan()
@@ -315,12 +420,10 @@ class BleDoorController(context: Context) {
     @SuppressLint("MissingPermission")
     fun stopOpenerMonitoring() {
         presenceMonitoringActive = false
-        if (pendingOperation is PendingOperation.None && _connectionState.value is BleConnectionState.Connecting) {
-            cancelConnectionTimeout()
-            runCatching { gatt?.disconnect() }
-            closeGatt()
-            _connectionState.value = BleConnectionState.Disconnected
-            _state.value = BleState.Idle
+        if (pendingOperation is PendingOperation.None &&
+            (gatt != null || _connectionState.value !is BleConnectionState.Disconnected)
+        ) {
+            releaseIdleConnection("monitoring_stopped")
         }
         presenceProfile = null
         presenceLockedAddress = null
@@ -337,7 +440,7 @@ class BleDoorController(context: Context) {
 
     @SuppressLint("MissingPermission")
     private fun startPresenceScanWindow() {
-        if (!presenceMonitoringActive || !hasBluetoothPermission() || !isBluetoothEnabled()) {
+        if (!presenceMonitoringActive || !appInForeground || !hasBluetoothPermission() || !isBluetoothEnabled()) {
             if (presenceMonitoringActive) {
                 val address = presenceProfile?.address.orEmpty().uppercase()
                 publishOpenerConnection(OpenerConnectionStatus.NOT_FOUND, address)
@@ -451,7 +554,7 @@ class BleDoorController(context: Context) {
                         "threshold=$presenceAutoConnectRssiThreshold autoConnectEnabled=$presenceAutoConnectEnabled",
                 )
             }
-            connectAddress(profile.address)
+            connectAddress(profile.address, ConnectionPurpose.PREHEAT)
         }
     }
 
@@ -463,11 +566,11 @@ class BleDoorController(context: Context) {
         if (System.currentTimeMillis() - lastAutoConnectAttemptAtMs < OpenerConnectionPolicy.AUTO_CONNECT_RETRY_COOLDOWN_MS) {
             return false
         }
-        return pendingOperation is PendingOperation.None && currentAddress == null
+        return appInForeground && pendingOperation is PendingOperation.None && currentAddress == null
     }
 
     private fun schedulePresenceScanRestart() {
-        if (!presenceMonitoringActive || presenceScanRestart != null) return
+        if (!presenceMonitoringActive || !appInForeground || presenceScanRestart != null) return
         presenceScanRestart = Runnable {
             presenceScanRestart = null
             if (presenceMonitoringActive) startPresenceScanWindow()
@@ -493,6 +596,28 @@ class BleDoorController(context: Context) {
             address = address.trim().uppercase(),
             rssi = rssi,
         )
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun releaseIdleConnection(reason: String) {
+        if (pendingOperation !is PendingOperation.None) return
+        val address = currentAddress
+        logTiming("release", "reason=$reason")
+        cancelConnectionTimeout()
+        cancelOperationTimeout()
+        cancelWriteRetry()
+        cancelDescriptorRetry()
+        runCatching { gatt?.disconnect() }
+        closeGatt()
+        _connectionState.value = BleConnectionState.Disconnected
+        if (_state.value is BleState.Connecting || _state.value is BleState.Ready) {
+            _state.value = BleState.Idle
+        }
+        connectionPurpose = ConnectionPurpose.NONE
+        if (appInForeground && presenceMonitoringActive && !address.isNullOrBlank()) {
+            publishOpenerConnection(OpenerConnectionStatus.NOT_FOUND, address)
+            schedulePresenceScanRestart()
+        }
     }
 
     @SuppressLint("MissingPermission")
@@ -728,7 +853,7 @@ class BleDoorController(context: Context) {
         cancelWriteRetry()
         cancelDescriptorRetry()
         pendingOperation = PendingOperation.Pairing(normalizedPassword)
-        connectAddress(device.device.address)
+        connectAddress(device.device.address, ConnectionPurpose.PAIRING)
     }
 
     @SuppressLint("MissingPermission")
@@ -750,7 +875,7 @@ class BleDoorController(context: Context) {
             return
         }
         pendingOperation = PendingOperation.None
-        connectAddress(address)
+        connectAddress(address, ConnectionPurpose.EXPLICIT_CONNECT)
     }
 
     fun isConnected(address: String): Boolean =
@@ -763,7 +888,13 @@ class BleDoorController(context: Context) {
     }
 
     @SuppressLint("MissingPermission")
-    private fun connectAddress(address: String) {
+    private fun connectAddress(address: String, purpose: ConnectionPurpose) {
+        if (!appInForeground && purpose == ConnectionPurpose.PREHEAT) {
+            if (BuildConfig.DEBUG) Log.d(TAG, "BLE_CONNECT skipped=background_preheat")
+            return
+        }
+        backgroundRelease?.let(mainHandler::removeCallbacks)
+        backgroundRelease = null
         if (!hasBluetoothPermission()) {
             _state.value = BleState.Error(text(R.string.error_bluetooth_permission))
             return
@@ -777,6 +908,8 @@ class BleDoorController(context: Context) {
             _state.value = BleState.Error(text(R.string.error_address_invalid))
             return
         }
+        beginTiming(purpose, normalizedAddress)
+        logTiming("connect_gatt_start")
         stopScan()
         presenceScanRestart?.let(mainHandler::removeCallbacks)
         presenceScanRestart = null
@@ -810,6 +943,7 @@ class BleDoorController(context: Context) {
             }
         }.getOrNull()
         if (gatt == null) {
+            logTiming("connect_gatt_return", "result=null")
             _connectionState.value = BleConnectionState.Disconnected
             _state.value = if (pendingOperation is PendingOperation.Pairing) {
                 BleState.Error(text(R.string.error_pairing_connection_timeout))
@@ -824,6 +958,7 @@ class BleDoorController(context: Context) {
             if (currentAddress.equals(normalizedAddress, ignoreCase = true) &&
                 _connectionState.value is BleConnectionState.Connecting
             ) {
+                logTiming("connection_timeout")
                 val pairing = pendingOperation is PendingOperation.Pairing
                 pendingOperation = PendingOperation.None
                 runCatching { gatt?.disconnect() }
@@ -853,12 +988,15 @@ class BleDoorController(context: Context) {
         if (link is BleConnectionState.Connected && link.address.equals(address, ignoreCase = true)) {
             sendPendingOperation()
         } else {
-            connectAddress(address)
+            connectAddress(address, ConnectionPurpose.UNLOCK)
         }
     }
 
     @SuppressLint("MissingPermission")
     fun disconnect() {
+        if (BuildConfig.DEBUG) Log.d(TAG, "BLE_LIFECYCLE explicit_disconnect")
+        backgroundRelease?.let(mainHandler::removeCallbacks)
+        backgroundRelease = null
         stopOpenerMonitoring()
         stopBatteryScan()
         pendingOperation = PendingOperation.None
@@ -928,6 +1066,7 @@ class BleDoorController(context: Context) {
             cancelOperationTimeout()
             operationTimeout = Runnable {
                 operationTimeout = null
+                logTiming("operation_timeout", "timeoutMs=$timeoutMs")
                 cancelWriteRetry()
                 cancelDescriptorRetry()
                 val operation = pendingOperation
@@ -936,9 +1075,11 @@ class BleDoorController(context: Context) {
                     is PendingOperation.Pairing -> BleState.Error(text(R.string.error_pairing_timeout))
                     else -> BleState.Error(text(R.string.error_unlock_timeout))
                 }
+                releaseIdleConnection("operation_timeout")
             }.also { mainHandler.postDelayed(it, timeoutMs) }
         }
 
+        logTiming("command_write_start", "bytes=${packet.size}")
         try {
             val status = if (Build.VERSION.SDK_INT >= 33) {
                 connection.writeCharacteristic(
@@ -951,6 +1092,7 @@ class BleDoorController(context: Context) {
                 characteristic.value = packet
                 if (connection.writeCharacteristic(characteristic)) BluetoothGatt.GATT_SUCCESS else BluetoothGatt.GATT_FAILURE
             }
+            logTiming("command_write_return", "status=$status")
             if (status == BluetoothStatusCodes.ERROR_GATT_WRITE_REQUEST_BUSY) {
                 scheduleWriteRetry(connection, characteristic)
             } else if (status != BluetoothGatt.GATT_SUCCESS) {
@@ -963,6 +1105,7 @@ class BleDoorController(context: Context) {
                 } else {
                     BleState.Error(text(R.string.error_unlock_write_status, status))
                 }
+                scheduleBackgroundRelease("command_write_failed")
             } else {
                 writeRetryCount = 0
             }
@@ -976,6 +1119,7 @@ class BleDoorController(context: Context) {
             } else {
                 BleState.Error(text(R.string.error_unlock_write_exception, error.message ?: text(R.string.error_unknown)))
             }
+            scheduleBackgroundRelease("command_write_exception")
         }
     }
 
@@ -1099,6 +1243,7 @@ class BleDoorController(context: Context) {
 
     @SuppressLint("MissingPermission")
     private fun failConnection(address: String, message: String) {
+        logTiming("connection_failed", "message=${message.replace(' ', '_')}")
         cancelConnectionTimeout()
         cancelOperationTimeout()
         cancelWriteRetry()
@@ -1116,8 +1261,10 @@ class BleDoorController(context: Context) {
         override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
             if (this@BleDoorController.gatt !== gatt) return
             val address = runCatching { gatt.device.address }.getOrNull()?.uppercase() ?: currentAddress.orEmpty()
+            logTiming("connection_state", "status=$status newState=$newState")
             if (newState == BluetoothProfile.STATE_CONNECTED && status == BluetoothGatt.GATT_SUCCESS) {
                 cancelConnectionTimeout()
+                logTiming("gatt_connected")
                 this@BleDoorController.gatt = gatt
                 currentAddress = address
                 _connectionState.value = BleConnectionState.Connecting(address)
@@ -1129,13 +1276,24 @@ class BleDoorController(context: Context) {
                 } else {
                     BleState.Connecting(address)
                 }
-                runCatching { gatt.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH) }
+                val priorityRequested = runCatching {
+                    gatt.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH)
+                }.getOrDefault(false)
+                logTiming("connection_priority", "requested=$priorityRequested")
+                logTiming("mtu_request_start", "requested=100")
                 if (!runCatching { gatt.requestMtu(100) }.getOrDefault(false)) {
+                    logTiming("mtu_request_return", "accepted=false fallback=discover_services")
                     mainHandler.postDelayed({
-                        if (this@BleDoorController.gatt === gatt) runCatching { gatt.discoverServices() }
+                        if (this@BleDoorController.gatt === gatt) {
+                            logTiming("service_discovery_start", "source=mtu_fallback")
+                            runCatching { gatt.discoverServices() }
+                        }
                     }, 300)
+                } else {
+                    logTiming("mtu_request_return", "accepted=true")
                 }
             } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
+                logTiming("gatt_disconnected", "status=$status")
                 cancelConnectionTimeout()
                 val operation = pendingOperation
                 _connectionState.value = BleConnectionState.Disconnected
@@ -1162,6 +1320,7 @@ class BleDoorController(context: Context) {
 
         override fun onMtuChanged(gatt: BluetoothGatt, mtu: Int, status: Int) {
             if (this@BleDoorController.gatt !== gatt) return
+            logTiming("mtu_changed", "mtu=$mtu status=$status")
             if (Build.VERSION.SDK_INT >= 31 &&
                 ContextCompat.checkSelfPermission(
                     appContext,
@@ -1171,6 +1330,7 @@ class BleDoorController(context: Context) {
                 return
             }
             try {
+                logTiming("service_discovery_start", "source=mtu_callback")
                 gatt.discoverServices()
             } catch (_: SecurityException) {
                 // Permission can be revoked between the explicit check and the callback.
@@ -1180,6 +1340,7 @@ class BleDoorController(context: Context) {
         @SuppressLint("MissingPermission")
         override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
             if (this@BleDoorController.gatt !== gatt) return
+            logTiming("services_discovered", "status=$status")
             val address = currentAddress.orEmpty()
             if (status != BluetoothGatt.GATT_SUCCESS) {
                 val pairing = pendingOperation is PendingOperation.Pairing
@@ -1204,7 +1365,9 @@ class BleDoorController(context: Context) {
                 )
                 return
             }
-            if (!gatt.setCharacteristicNotification(notifyCharacteristic, true)) {
+            val notificationEnabled = gatt.setCharacteristicNotification(notifyCharacteristic, true)
+            logTiming("notification_local", "enabled=$notificationEnabled")
+            if (!notificationEnabled) {
                 val pairing = pendingOperation is PendingOperation.Pairing
                 failConnection(
                     address,
@@ -1221,13 +1384,16 @@ class BleDoorController(context: Context) {
                 markReady()
                 return
             }
+            logTiming("cccd_write_start")
             val descriptorStatus = writeNotificationDescriptor(gatt, descriptor)
+            logTiming("cccd_write_return", "status=$descriptorStatus")
             // A busy descriptor write must finish before the password characteristic can be written.
             handleDescriptorWriteRequestResult(gatt, descriptor, descriptorStatus)
         }
 
         override fun onDescriptorWrite(gatt: BluetoothGatt, descriptor: BluetoothGattDescriptor, status: Int) {
             if (this@BleDoorController.gatt !== gatt) return
+            logTiming("cccd_write_complete", "status=$status uuid=${descriptor.uuid}")
             if (status == BluetoothGatt.GATT_SUCCESS) {
                 cancelDescriptorRetry()
                 markReady()
@@ -1254,6 +1420,7 @@ class BleDoorController(context: Context) {
     private fun markReady() {
         val address = currentAddress ?: return
         cancelConnectionTimeout()
+        logTiming("ready")
         _connectionState.value = BleConnectionState.Connected(address)
         if (presenceMonitoringActive && presenceProfile?.address.equals(address, ignoreCase = true)) {
             publishOpenerConnection(OpenerConnectionStatus.CONNECTED, address)
@@ -1268,6 +1435,7 @@ class BleDoorController(context: Context) {
     }
 
     private fun onResponse(bytes: ByteArray) {
+        logTiming("response", "bytes=${bytes.size} summary=${UnlockProtocol.responseSummary(bytes)}")
         cancelOperationTimeout()
         cancelWriteRetry()
         cancelDescriptorRetry()
@@ -1300,5 +1468,6 @@ class BleDoorController(context: Context) {
                 _state.value = BleState.Ready(address)
             }
         }
+        scheduleBackgroundRelease("background_operation_complete")
     }
 }
