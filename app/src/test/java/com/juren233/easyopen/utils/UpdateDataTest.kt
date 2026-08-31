@@ -63,4 +63,9 @@ class UpdateDataTest {
             ),
         )
     }
+    @Test
+    fun displayVersionOmitsInternalBuildNumber() {
+        assertEquals("v1.2.3", AvailableUpdate("1.2.3", 99).displayVersion)
+    }
+
 }

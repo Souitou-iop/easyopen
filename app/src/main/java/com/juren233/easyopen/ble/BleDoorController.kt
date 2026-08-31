@@ -4,15 +4,11 @@ import android.Manifest
 import android.annotation.SuppressLint
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
-import android.bluetooth.BluetoothGatt
-import android.bluetooth.BluetoothGattCallback
-import android.bluetooth.BluetoothGattCharacteristic
-import android.bluetooth.BluetoothGattDescriptor
 import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothProfile
-import android.bluetooth.BluetoothStatusCodes
 import android.bluetooth.le.BluetoothLeScanner
 import android.bluetooth.le.ScanCallback
+import android.bluetooth.le.ScanFilter
 import android.bluetooth.le.ScanResult
 import android.bluetooth.le.ScanSettings
 import android.content.Context
@@ -20,7 +16,6 @@ import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
-import android.os.SystemClock
 import android.util.Log
 import androidx.core.content.ContextCompat
 import com.juren233.easyopen.BuildConfig
@@ -31,7 +26,6 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
-import java.util.UUID
 
 sealed interface BleState {
     data object Idle : BleState
@@ -56,18 +50,11 @@ data class DiscoveredDevice(
 class BleDoorController(context: Context) {
     companion object {
         private const val TAG = "BleDoorController"
-        val SERVICE_UUID: UUID = UUID.fromString("6e400001-b5a3-f393-e0a9-e50e24dcca9e")
-        val WRITE_UUID: UUID = UUID.fromString("6e400002-b5a3-f393-e0a9-e50e24dcca9e")
-        val NOTIFY_UUID: UUID = UUID.fromString("6e400003-b5a3-f393-e0a9-e50e24dcca9e")
-        val CCCD_UUID: UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
-        private const val MAX_WRITE_RETRIES = 8
-        private const val WRITE_RETRY_DELAY_MS = 200L
         private const val DISCOVERY_SCAN_WINDOW_MS = 12_000L
         private const val SCAN_RESTART_DELAY_MS = 350L
         private const val PRESENCE_SCAN_WINDOW_MS = 8_000L
-        private const val GATT_CONNECTION_TIMEOUT_MS = 8_000L
         /** Keep a foreground preheat link briefly across a transient app switch, then release it. */
-        private const val BACKGROUND_RELEASE_GRACE_MS = 3_000L
+        private const val BACKGROUND_RELEASE_GRACE_MS = 2_000L
 
         /** The original app accepts local openers whose advertised name contains YILA, except remotes. */
         fun isYiLaOpenerName(name: String): Boolean {
@@ -88,18 +75,7 @@ class BleDoorController(context: Context) {
     /** The controller starts in the foreground; MainActivity updates this at lifecycle boundaries. */
     private var appInForeground = true
     private var backgroundRelease: Runnable? = null
-    private var timingSequence = 0L
-    private var timingId = 0L
-    private var timingStartedAtMs = 0L
-    private var connectionPurpose = ConnectionPurpose.NONE
-
-    private enum class ConnectionPurpose {
-        NONE,
-        PREHEAT,
-        EXPLICIT_CONNECT,
-        UNLOCK,
-        PAIRING,
-    }
+    private var queuedExplicitConnect: Pair<String, BleConnectionPurpose>? = null
 
     private val _state = MutableStateFlow<BleState>(BleState.Idle)
     val state: StateFlow<BleState> = _state.asStateFlow()
@@ -113,76 +89,103 @@ class BleDoorController(context: Context) {
     /** Four-state availability/link status for the active opener shown on the home page. */
     val openerConnection: StateFlow<OpenerConnectionSnapshot> = _openerConnection.asStateFlow()
 
-    private var scannerCallback: ScanCallback? = null
-    private var discoveryScanActive = false
-    private var discoveryScanRestart: Runnable? = null
-    private var discoveryScanWindow: Runnable? = null
-    private var presenceScannerCallback: ScanCallback? = null
-    private var presenceScanRestart: Runnable? = null
-    private var presenceScanWindow: Runnable? = null
     private var presenceMonitoringActive = false
     private var presenceProfile: DeviceProfile? = null
     private var presenceLockedAddress: String? = null
     private var presenceLastRssi: Int? = null
     private var presenceLastSeenAtMs: Long = 0L
     private var presenceWindowHadTarget = false
+    private var presenceWindowId = 0
+    private var presenceWindowTargetCount = 0
     private var presenceAutoConnectEnabled = true
     private var presenceAutoConnectRssiThreshold = OpenerConnectionPolicy.AUTO_CONNECT_RSSI_THRESHOLD
-    private var presenceWindowId = 0
-    private var lastAutoConnectAttemptAtMs = 0L
-    private var batteryScannerCallback: ScanCallback? = null
-    private var batteryScanRestart: Runnable? = null
-    private var batteryScanActive = false
     private var batteryScanDurationMs = 12_000L
     private var batteryScanTargetAddress: String? = null
     private val batteryDiagnosticSignatures = LinkedHashSet<String>()
-    private var batteryScanWindowIndex = 0
     private var batteryWindowResultCount = 0
     private var batteryWindowTargetCount = 0
     private var batteryWindowExactAddressCount = 0
     private var batteryWindowValidLevelCount = 0
-    private var gatt: BluetoothGatt? = null
-    private var writeCharacteristic: BluetoothGattCharacteristic? = null
-    private var notifyCharacteristic: BluetoothGattCharacteristic? = null
-    private var currentAddress: String? = null
+    private val discoveryScanner = BleScanWindow(
+        scannerProvider = { adapter?.bluetoothLeScanner },
+        canScan = { hasBluetoothPermission() && isBluetoothEnabled() },
+        durationMs = { DISCOVERY_SCAN_WINDOW_MS },
+        restartDelayMs = SCAN_RESTART_DELAY_MS,
+        label = "discovery",
+        handler = mainHandler,
+        handleScanResult = { _, result -> consumeDiscoveryScanResult(result) },
+    )
+    private val presenceScanner = BleScanWindow(
+        scannerProvider = { adapter?.bluetoothLeScanner },
+        canScan = { appInForeground && hasBluetoothPermission() && isBluetoothEnabled() },
+        durationMs = { PRESENCE_SCAN_WINDOW_MS },
+        restartDelayMs = SCAN_RESTART_DELAY_MS,
+        label = "presence",
+        handler = mainHandler,
+        filtersProvider = ::presenceScanFilters,
+        handleScanResult = { windowId, result -> consumePresenceScanResult(windowId, result) },
+        handleWindowFinished = ::finishPresenceScanWindow,
+    )
+    private val batteryScanner = BleScanWindow(
+        scannerProvider = { adapter?.bluetoothLeScanner },
+        canScan = { hasBluetoothPermission() && isBluetoothEnabled() },
+        durationMs = { batteryScanDurationMs },
+        restartDelayMs = SCAN_RESTART_DELAY_MS,
+        label = "battery",
+        handler = mainHandler,
+        handleScanResult = { windowId, result ->
+            batteryWindowResultCount += 1
+            consumeBatteryScanResult(windowId, result)
+        },
+        handleBatchScanResults = { windowId, results ->
+            batteryWindowResultCount += results.size
+            results.forEach { consumeBatteryScanResult(windowId, it) }
+        },
+        handleScanFailed = ::handleBatteryScanFailure,
+        handleWindowFinished = ::finishBatteryScanWindow,
+    )
     private var pendingOperation: PendingOperation = PendingOperation.None
     private var operationTimeout: Runnable? = null
-    private var connectionTimeout: Runnable? = null
-    private var writeRetry: Runnable? = null
-    private var writeRetryCount = 0
-    private var descriptorRetry: Runnable? = null
-    private var descriptorRetryCount = 0
-
-    private fun timingElapsedMs(): Long =
-        if (timingStartedAtMs == 0L) 0L else SystemClock.elapsedRealtime() - timingStartedAtMs
-
-    private fun logTiming(stage: String, details: String = "") {
-        if (!BuildConfig.DEBUG || timingId == 0L) return
-        val suffix = details.takeIf(String::isNotBlank)?.let { " $it" }.orEmpty()
-        Log.d(
-            TAG,
-            "BLE_TIMING id=$timingId purpose=${connectionPurpose.name.lowercase()} " +
-                "stage=$stage elapsedMs=${timingElapsedMs()} address=${currentAddress ?: "unknown"}$suffix",
-        )
-    }
-
-    private fun beginTiming(purpose: ConnectionPurpose, address: String) {
-        timingId = ++timingSequence
-        timingStartedAtMs = SystemClock.elapsedRealtime()
-        connectionPurpose = purpose
-        if (BuildConfig.DEBUG) {
-            Log.d(
-                TAG,
-                "BLE_TIMING id=$timingId purpose=${purpose.name.lowercase()} " +
-                    "stage=begin elapsedMs=0 address=${address.trim().uppercase()} pid=${android.os.Process.myPid()}",
-            )
+    private val diagnostics = BleConnectionDiagnostics(TAG)
+    private val gattSession = BleGattSession(appContext, object : BleGattSessionListener {
+        override fun onLinkConnecting(address: String, purpose: BleConnectionPurpose) {
+            _connectionState.value = BleConnectionState.Connecting(address)
+            publishConnecting(address)
         }
-    }
+
+        override fun onLinkConnected(address: String, purpose: BleConnectionPurpose) {
+            _connectionState.value = BleConnectionState.Connecting(address)
+            publishConnecting(address)
+        }
+
+        override fun onLinkReady(address: String, purpose: BleConnectionPurpose) {
+            handleGattReady(address)
+        }
+
+        override fun onGattResponse(bytes: ByteArray) {
+            handleGattResponse(bytes)
+        }
+
+        override fun onGattFailure(
+            address: String,
+            purpose: BleConnectionPurpose,
+            failure: BleGattFailure,
+        ) {
+            handleGattFailure(address, purpose, failure)
+        }
+
+        override fun onGattReleased(address: String, purpose: BleConnectionPurpose, reason: String) {
+            handleGattReleased(address, purpose, reason)
+        }
+    })
 
     private sealed interface PendingOperation {
         data object None : PendingOperation
         data class Pairing(val password: String) : PendingOperation
-        data class Unlock(val profile: DeviceProfile) : PendingOperation
+        data class Unlock(
+            val profile: DeviceProfile,
+            val onComplete: ((success: Boolean) -> Unit)? = null,
+        ) : PendingOperation
     }
 
     fun hasBluetoothPermission(): Boolean = if (Build.VERSION.SDK_INT >= 31) {
@@ -198,103 +201,32 @@ class BleDoorController(context: Context) {
 
     @SuppressLint("MissingPermission")
     fun startScan() {
-        if (!hasBluetoothPermission()) {
-            _state.value = BleState.Error(text(R.string.error_bluetooth_permission))
-            return
+        when {
+            !hasBluetoothPermission() -> _state.value = BleState.Error(text(R.string.error_bluetooth_permission))
+            !isBluetoothEnabled() -> _state.value = BleState.Error(text(R.string.error_bluetooth_disabled))
+            adapter?.bluetoothLeScanner == null -> _state.value = BleState.Error(text(R.string.error_scanner_unavailable))
+            else -> {
+                _devices.value = emptyList()
+                _state.value = BleState.Scanning
+                discoveryScanner.start()
+            }
         }
-        if (!isBluetoothEnabled()) {
-            _state.value = BleState.Error(text(R.string.error_bluetooth_disabled))
-            return
-        }
-        val bleScanner = adapter?.bluetoothLeScanner
-        if (bleScanner == null) {
-            _state.value = BleState.Error(text(R.string.error_scanner_unavailable))
-            return
-        }
-
-        discoveryScanActive = true
-        discoveryScanRestart?.let(mainHandler::removeCallbacks)
-        discoveryScanRestart = null
-        stopDiscoveryScanWindow()
-        _devices.value = emptyList()
-        startDiscoveryScanWindow(bleScanner)
     }
 
     @SuppressLint("MissingPermission")
-    private fun startDiscoveryScanWindow(bleScanner: BluetoothLeScanner) {
-        if (!discoveryScanActive) return
-        stopDiscoveryScanWindow()
-        val callback = object : ScanCallback() {
-            override fun onScanResult(callbackType: Int, result: ScanResult) {
-                val device = result.device ?: return
-                val advertisedName = advertisedName(device, result)
-                // Match the original local-device path: advertised name contains YILA and excludes REMOTE.
-                if (!isYiLaOpenerName(advertisedName)) return
-
-                updateBatteryLevel(device.address, result.scanRecord?.bytes)
-                val next = DiscoveredDevice(
-                    device = device,
-                    name = advertisedName.trim().ifBlank { text(R.string.default_opener_advertised_name) },
-                    rssi = result.rssi,
-                )
-                _devices.value = (_devices.value
-                    .filterNot { it.device.address.equals(device.address, ignoreCase = true) } + next)
-                    .sortedByDescending(DiscoveredDevice::rssi)
-            }
-
-            override fun onScanFailed(errorCode: Int) {
-                if (scannerCallback === this) {
-                    scannerCallback = null
-                    // Discovery is deliberately self-healing. A temporary platform scan
-                    // error must not strand the pairing page in an error state.
-                    scheduleDiscoveryScanRestart()
-                }
-            }
-        }
-        scannerCallback = callback
-        _state.value = BleState.Scanning
-        runCatching {
-            // The original app starts an unfiltered low-latency scan and filters the advertised name in its callback.
-            bleScanner.startScan(
-                null,
-                ScanSettings.Builder()
-                    .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
-                    .setCallbackType(ScanSettings.CALLBACK_TYPE_ALL_MATCHES)
-                    .setMatchMode(ScanSettings.MATCH_MODE_AGGRESSIVE)
-                    .setNumOfMatches(ScanSettings.MATCH_NUM_MAX_ADVERTISEMENT)
-                    .setReportDelay(0L)
-                    .build(),
-                callback,
-            )
-        }.onFailure {
-            if (BuildConfig.DEBUG) Log.w(TAG, "discovery scan start failed: ${it.message}")
-            if (scannerCallback === callback) scannerCallback = null
-            scheduleDiscoveryScanRestart()
-        }
-        discoveryScanWindow = Runnable {
-            if (scannerCallback === callback) {
-                stopDiscoveryScanWindow()
-                scheduleDiscoveryScanRestart()
-            }
-        }.also { mainHandler.postDelayed(it, DISCOVERY_SCAN_WINDOW_MS) }
-    }
-
-    private fun scheduleDiscoveryScanRestart() {
-        if (!discoveryScanActive || discoveryScanRestart != null) return
-        discoveryScanRestart = Runnable {
-            discoveryScanRestart = null
-            if (!discoveryScanActive || !hasBluetoothPermission() || !isBluetoothEnabled()) return@Runnable
-            adapter?.bluetoothLeScanner?.let(::startDiscoveryScanWindow)
-        }.also { mainHandler.postDelayed(it, SCAN_RESTART_DELAY_MS) }
-    }
-
-    @SuppressLint("MissingPermission")
-    private fun stopDiscoveryScanWindow() {
-        discoveryScanWindow?.let(mainHandler::removeCallbacks)
-        discoveryScanWindow = null
-        val callback = scannerCallback ?: return
-        runCatching { adapter?.bluetoothLeScanner?.stopScan(callback) }
-        scannerCallback = null
+    private fun consumeDiscoveryScanResult(result: ScanResult) {
+        val device = result.device ?: return
+        val name = advertisedName(device, result)
+        if (!isYiLaOpenerName(name)) return
+        updateBatteryLevel(device.address, result.scanRecord?.bytes)
+        val next = DiscoveredDevice(
+            device = device,
+            name = name.trim().ifBlank { text(R.string.default_opener_advertised_name) },
+            rssi = result.rssi,
+        )
+        _devices.value = (_devices.value
+            .filterNot { it.device.address.equals(device.address, ignoreCase = true) } + next)
+            .sortedByDescending(DiscoveredDevice::rssi)
     }
 
     @SuppressLint("MissingPermission")
@@ -302,6 +234,11 @@ class BleDoorController(context: Context) {
         return runCatching { device.name.orEmpty() }.getOrDefault("")
             .ifBlank { AdvertisementNameParser.parse(result.scanRecord?.bytes).orEmpty() }
             .ifBlank { result.scanRecord?.deviceName.orEmpty() }
+    }
+
+    private fun cancelOperationTimeout() {
+        operationTimeout?.let(mainHandler::removeCallbacks)
+        operationTimeout = null
     }
 
     private fun scheduleBackgroundRelease(reason: String) {
@@ -352,9 +289,7 @@ class BleDoorController(context: Context) {
                     "connection=${_connectionState.value::class.simpleName}",
             )
         }
-        presenceScanRestart?.let(mainHandler::removeCallbacks)
-        presenceScanRestart = null
-        stopPresenceScanWindow()
+        presenceScanner.stop()
         if (pendingOperation is PendingOperation.None) {
             scheduleBackgroundRelease("background_idle")
         } else if (BuildConfig.DEBUG) {
@@ -378,20 +313,30 @@ class BleDoorController(context: Context) {
         backgroundRelease?.let(mainHandler::removeCallbacks)
         backgroundRelease = null
         val address = profile.address.trim().uppercase()
+        val sameTarget = presenceMonitoringActive &&
+            presenceLockedAddress.equals(address, ignoreCase = true)
         stopScan()
         stopBatteryScan()
-        stopPresenceScanWindow()
-        presenceScanRestart?.let(mainHandler::removeCallbacks)
-        presenceScanRestart = null
+        if (!sameTarget) presenceScanner.stop()
         presenceMonitoringActive = address.isNotBlank() && BluetoothAdapter.checkBluetoothAddress(address)
         presenceProfile = profile
         presenceLockedAddress = address.takeIf(BluetoothAdapter::checkBluetoothAddress)
-        presenceLastRssi = null
-        presenceLastSeenAtMs = 0L
-        presenceWindowHadTarget = false
+        if (!sameTarget) {
+            presenceLastRssi = null
+            presenceLastSeenAtMs = 0L
+            presenceWindowHadTarget = false
+            presenceWindowId = 0
+            presenceWindowTargetCount = 0
+        }
         presenceAutoConnectEnabled = autoConnectEnabled
         presenceAutoConnectRssiThreshold = AutoConnectSettings.normalizeRssiThreshold(autoConnectRssiThreshold)
-        lastAutoConnectAttemptAtMs = 0L
+        if (BuildConfig.DEBUG) {
+            Log.d(
+                TAG,
+                "BLE_SCAN presence_monitoring target=$address sameTarget=$sameTarget " +
+                    "autoConnect=$autoConnectEnabled threshold=$presenceAutoConnectRssiThreshold",
+            )
+        }
 
         val link = _connectionState.value
         when {
@@ -421,7 +366,7 @@ class BleDoorController(context: Context) {
     fun stopOpenerMonitoring() {
         presenceMonitoringActive = false
         if (pendingOperation is PendingOperation.None &&
-            (gatt != null || _connectionState.value !is BleConnectionState.Disconnected)
+            gattSession.phase != BleConnectionPhase.DISCONNECTED
         ) {
             releaseIdleConnection("monitoring_stopped")
         }
@@ -432,94 +377,51 @@ class BleDoorController(context: Context) {
         presenceWindowHadTarget = false
         presenceAutoConnectEnabled = true
         presenceAutoConnectRssiThreshold = OpenerConnectionPolicy.AUTO_CONNECT_RSSI_THRESHOLD
-        presenceScanRestart?.let(mainHandler::removeCallbacks)
-        presenceScanRestart = null
-        stopPresenceScanWindow()
+        presenceScanner.stop()
         _openerConnection.value = OpenerConnectionSnapshot()
     }
 
     @SuppressLint("MissingPermission")
     private fun startPresenceScanWindow() {
-        if (!presenceMonitoringActive || !appInForeground || !hasBluetoothPermission() || !isBluetoothEnabled()) {
-            if (presenceMonitoringActive) {
-                val address = presenceProfile?.address.orEmpty().uppercase()
-                publishOpenerConnection(OpenerConnectionStatus.NOT_FOUND, address)
-                schedulePresenceScanRestart()
-            }
-            return
-        }
-        val bleScanner = adapter?.bluetoothLeScanner ?: run {
+        if (!presenceMonitoringActive || !appInForeground) return
+        if (!hasBluetoothPermission() || !isBluetoothEnabled()) {
             publishOpenerConnection(
                 OpenerConnectionStatus.NOT_FOUND,
                 presenceProfile?.address.orEmpty().uppercase(),
             )
-            schedulePresenceScanRestart()
             return
         }
-        stopPresenceScanWindow()
-        presenceWindowHadTarget = false
-        val windowId = ++presenceWindowId
-        val callback = object : ScanCallback() {
-            override fun onScanResult(callbackType: Int, result: ScanResult) {
-                if (presenceScannerCallback === this) consumePresenceScanResult(windowId, result)
-            }
-
-            override fun onBatchScanResults(results: MutableList<ScanResult>) {
-                if (presenceScannerCallback === this) {
-                    results.forEach { consumePresenceScanResult(windowId, it) }
-                }
-            }
-
-            override fun onScanFailed(errorCode: Int) {
-                if (BuildConfig.DEBUG) {
-                    Log.w(TAG, "opener presence scan failed window=$windowId errorCode=$errorCode")
-                }
-                if (presenceScannerCallback === this) {
-                    presenceScannerCallback = null
-                    schedulePresenceScanRestart()
-                }
-            }
-        }
-        presenceScannerCallback = callback
-        runCatching {
-            bleScanner.startScan(
-                null,
-                ScanSettings.Builder()
-                    .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
-                    .setCallbackType(ScanSettings.CALLBACK_TYPE_ALL_MATCHES)
-                    .setMatchMode(ScanSettings.MATCH_MODE_AGGRESSIVE)
-                    .setNumOfMatches(ScanSettings.MATCH_NUM_MAX_ADVERTISEMENT)
-                    .setReportDelay(0L)
-                    .build(),
-                callback,
+        if (BuildConfig.DEBUG) {
+            Log.d(
+                TAG,
+                "BLE_SCAN presence_start target=${presenceLockedAddress ?: "unknown"} " +
+                    "phase=${gattSession.phase} waitingForFresh=${gattSession.waitingForFreshAdvertisement}",
             )
-        }.onFailure {
-            if (BuildConfig.DEBUG) {
-                Log.w(TAG, "opener presence scan start failed window=$windowId: ${it.message}")
-            }
-            if (presenceScannerCallback === callback) presenceScannerCallback = null
-            schedulePresenceScanRestart()
         }
-        presenceScanWindow = Runnable {
-            if (presenceScannerCallback !== callback) return@Runnable
-            val address = presenceProfile?.address.orEmpty().uppercase()
-            val connected = _connectionState.value is BleConnectionState.Connected &&
-                (_connectionState.value as BleConnectionState.Connected).address.equals(address, ignoreCase = true)
-            val signalFresh = OpenerConnectionPolicy.isSignalFresh(presenceLastSeenAtMs, System.currentTimeMillis())
-            if (!connected && !signalFresh) {
-                publishOpenerConnection(OpenerConnectionStatus.NOT_FOUND, address)
-            }
-            if (BuildConfig.DEBUG) {
-                Log.d(
-                    TAG,
-                    "opener presence window=$windowId finished targetSeen=$presenceWindowHadTarget " +
-                        "signalFresh=$signalFresh rssi=${presenceLastRssi ?: "unknown"} " +
-                        "status=${_openerConnection.value.status}",
-                )
-            }
-            stopPresenceScanWindow()
-            schedulePresenceScanRestart()
-        }.also { mainHandler.postDelayed(it, PRESENCE_SCAN_WINDOW_MS) }
+        presenceScanner.start()
+    }
+
+    private fun presenceScanFilters(): List<ScanFilter> {
+        val address = presenceLockedAddress ?: return emptyList()
+        if (!BluetoothAdapter.checkBluetoothAddress(address)) return emptyList()
+        return listOf(ScanFilter.Builder().setDeviceAddress(address).build())
+    }
+
+    private fun finishPresenceScanWindow(windowId: Int) {
+        val address = presenceProfile?.address.orEmpty().uppercase()
+        val connected = _connectionState.value is BleConnectionState.Connected &&
+            (_connectionState.value as BleConnectionState.Connected).address.equals(address, ignoreCase = true)
+        val signalFresh = OpenerConnectionPolicy.isSignalFresh(presenceLastSeenAtMs, System.currentTimeMillis())
+        if (!connected && !signalFresh) publishOpenerConnection(OpenerConnectionStatus.NOT_FOUND, address)
+        if (BuildConfig.DEBUG) {
+            Log.d(
+                TAG,
+                "BLE_SCAN presence_window_finished window=$windowId targetSeen=$presenceWindowHadTarget " +
+                    "targetCount=$presenceWindowTargetCount " +
+                    "signalFresh=$signalFresh rssi=${presenceLastRssi ?: "unknown"} " +
+                    "status=${_openerConnection.value.status}",
+            )
+        }
     }
 
     @SuppressLint("MissingPermission")
@@ -534,56 +436,55 @@ class BleDoorController(context: Context) {
         if (!address.equals(targetAddress, ignoreCase = true)) return
 
         val rssi = result.rssi
+        if (presenceWindowId != windowId) {
+            presenceWindowId = windowId
+            presenceWindowTargetCount = 0
+        }
+        presenceWindowTargetCount += 1
+        val firstTarget = !presenceWindowHadTarget
         if (BuildConfig.DEBUG) {
-            Log.d(TAG, "opener presence result window=$windowId address=$address rssi=$rssi")
+            Log.d(
+                TAG,
+                "BLE_SCAN presence_target_result window=$windowId address=$address rssi=$rssi " +
+                    "firstTarget=$firstTarget count=$presenceWindowTargetCount",
+            )
         }
         presenceWindowHadTarget = true
         presenceLastRssi = rssi
         presenceLastSeenAtMs = System.currentTimeMillis()
         updateBatteryLevel(address, result.scanRecord?.bytes)
         publishOpenerConnection(OpenerConnectionStatus.DISCOVERED, targetAddress, rssi)
-        if (presenceAutoConnectEnabled &&
+        val freshAfterRelease = gattSession.consumeFreshAdvertisement()
+        if (presenceAutoConnectEnabled && freshAfterRelease &&
             OpenerConnectionPolicy.shouldAutoConnect(rssi, presenceAutoConnectRssiThreshold) &&
             canAutoConnect(profile)
         ) {
-            lastAutoConnectAttemptAtMs = System.currentTimeMillis()
             if (BuildConfig.DEBUG) {
                 Log.d(
                     TAG,
-                    "opener presence eligible window=$windowId address=$address rssi=$rssi " +
+                    "BLE_SCAN auto_connect_allowed window=$windowId address=$address rssi=$rssi " +
                         "threshold=$presenceAutoConnectRssiThreshold autoConnectEnabled=$presenceAutoConnectEnabled",
                 )
             }
-            connectAddress(profile.address, ConnectionPurpose.PREHEAT)
+            connectAddress(profile.address, BleConnectionPurpose.PREHEAT)
+        } else if (BuildConfig.DEBUG) {
+            Log.d(
+                TAG,
+                "BLE_SCAN auto_connect_rejected window=$windowId address=$address rssi=$rssi " +
+                    "freshAfterRelease=$freshAfterRelease threshold=$presenceAutoConnectRssiThreshold " +
+                    "autoConnectEnabled=$presenceAutoConnectEnabled phase=${gattSession.phase}",
+            )
         }
     }
 
     private fun canAutoConnect(profile: DeviceProfile): Boolean {
         val targetAddress = profile.address.trim().uppercase()
-        val link = _connectionState.value
-        if (link is BleConnectionState.Connected && link.address.equals(targetAddress, ignoreCase = true)) return false
-        if (link is BleConnectionState.Connecting) return false
-        if (System.currentTimeMillis() - lastAutoConnectAttemptAtMs < OpenerConnectionPolicy.AUTO_CONNECT_RETRY_COOLDOWN_MS) {
-            return false
-        }
-        return appInForeground && pendingOperation is PendingOperation.None && currentAddress == null
-    }
-
-    private fun schedulePresenceScanRestart() {
-        if (!presenceMonitoringActive || !appInForeground || presenceScanRestart != null) return
-        presenceScanRestart = Runnable {
-            presenceScanRestart = null
-            if (presenceMonitoringActive) startPresenceScanWindow()
-        }.also { mainHandler.postDelayed(it, SCAN_RESTART_DELAY_MS) }
-    }
-
-    @SuppressLint("MissingPermission")
-    private fun stopPresenceScanWindow() {
-        presenceScanWindow?.let(mainHandler::removeCallbacks)
-        presenceScanWindow = null
-        val callback = presenceScannerCallback ?: return
-        runCatching { adapter?.bluetoothLeScanner?.stopScan(callback) }
-        presenceScannerCallback = null
+        if (gattSession.address.equals(targetAddress, ignoreCase = true) &&
+            gattSession.phase != BleConnectionPhase.DISCONNECTED
+        ) return false
+        if (gattSession.phase != BleConnectionPhase.DISCONNECTED) return false
+        return appInForeground && pendingOperation is PendingOperation.None &&
+            !gattSession.waitingForFreshAdvertisement
     }
 
     private fun publishOpenerConnection(
@@ -598,139 +499,59 @@ class BleDoorController(context: Context) {
         )
     }
 
-    @SuppressLint("MissingPermission")
     private fun releaseIdleConnection(reason: String) {
-        if (pendingOperation !is PendingOperation.None) return
-        val address = currentAddress
-        logTiming("release", "reason=$reason")
-        cancelConnectionTimeout()
-        cancelOperationTimeout()
-        cancelWriteRetry()
-        cancelDescriptorRetry()
-        runCatching { gatt?.disconnect() }
-        closeGatt()
-        _connectionState.value = BleConnectionState.Disconnected
-        if (_state.value is BleState.Connecting || _state.value is BleState.Ready) {
-            _state.value = BleState.Idle
-        }
-        connectionPurpose = ConnectionPurpose.NONE
-        if (appInForeground && presenceMonitoringActive && !address.isNullOrBlank()) {
-            publishOpenerConnection(OpenerConnectionStatus.NOT_FOUND, address)
-            schedulePresenceScanRestart()
-        }
+        if (pendingOperation !is PendingOperation.None || gattSession.phase == BleConnectionPhase.DISCONNECTED) return
+        gattSession.release(
+            reason = reason,
+            waitForFreshAdvertisement = presenceMonitoringActive,
+        )
     }
 
-    @SuppressLint("MissingPermission")
     private fun closeCurrentLinkForDifferentAddress(address: String) {
-        val current = currentAddress
+        val current = gattSession.address
         if (current.isNullOrBlank() || current.equals(address, ignoreCase = true)) return
-        runCatching { gatt?.disconnect() }
-        cancelOperationTimeout()
-        cancelConnectionTimeout()
         pendingOperation = PendingOperation.None
-        closeGatt()
+        gattSession.release("switch_profile", waitForFreshAdvertisement = false)
         _connectionState.value = BleConnectionState.Disconnected
-    }
-
-    private fun restorePresenceAfterLinkFailure(address: String) {
-        if (!presenceMonitoringActive || !presenceProfile?.address.equals(address, ignoreCase = true)) return
-        val now = System.currentTimeMillis()
-        if (presenceLastRssi != null && OpenerConnectionPolicy.isSignalFresh(presenceLastSeenAtMs, now)) {
-            publishOpenerConnection(OpenerConnectionStatus.DISCOVERED, address, presenceLastRssi)
-        } else {
-            publishOpenerConnection(OpenerConnectionStatus.NOT_FOUND, address)
-        }
-        schedulePresenceScanRestart()
     }
 
     @SuppressLint("MissingPermission")
     fun startBatteryScan(address: String? = null, durationMs: Long = 12_000L) {
         if (!hasBluetoothPermission() || !isBluetoothEnabled()) return
-        val bleScanner = adapter?.bluetoothLeScanner ?: return
         batteryScanTargetAddress = address?.trim()?.uppercase()?.takeIf(BluetoothAdapter::checkBluetoothAddress)
         batteryScanDurationMs = durationMs.coerceAtLeast(1_000L)
         batteryDiagnosticSignatures.clear()
-        if (BuildConfig.DEBUG) {
-            Log.d(TAG, "start battery scan target=${batteryScanTargetAddress ?: "any YiLa opener"} durationMs=$batteryScanDurationMs")
-        }
-        batteryScanActive = true
-        batteryScanRestart?.let(mainHandler::removeCallbacks)
-        batteryScanRestart = null
-        startBatteryScanWindow(bleScanner)
-    }
-
-    @SuppressLint("MissingPermission")
-    private fun startBatteryScanWindow(bleScanner: BluetoothLeScanner) {
-        if (!batteryScanActive) return
-        stopBatteryScanWindow()
-        val windowId = ++batteryScanWindowIndex
         batteryWindowResultCount = 0
         batteryWindowTargetCount = 0
         batteryWindowExactAddressCount = 0
         batteryWindowValidLevelCount = 0
-        val callback = object : ScanCallback() {
-            override fun onScanResult(callbackType: Int, result: ScanResult) {
-                batteryWindowResultCount += 1
-                consumeBatteryScanResult(windowId, result)
-            }
+        if (BuildConfig.DEBUG) {
+            Log.d(TAG, "start battery scan target=${batteryScanTargetAddress ?: "any YiLa opener"} durationMs=$batteryScanDurationMs")
+        }
+        batteryScanner.start()
+    }
 
-            override fun onBatchScanResults(results: MutableList<ScanResult>) {
-                batteryWindowResultCount += results.size
-                results.forEach { consumeBatteryScanResult(windowId, it) }
-            }
+    private fun handleBatteryScanFailure(windowId: Int, errorCode: Int) {
+        if (BuildConfig.DEBUG) {
+            Log.w(
+                TAG,
+                "battery scan failed window=$windowId errorCode=$errorCode " +
+                    "results=$batteryWindowResultCount targetHits=$batteryWindowTargetCount " +
+                    "exactAddressHits=$batteryWindowExactAddressCount validLevels=$batteryWindowValidLevelCount " +
+                    "target=${batteryScanTargetAddress ?: "any YiLa opener"}",
+            )
+        }
+    }
 
-            override fun onScanFailed(errorCode: Int) {
-                // Battery is optional; keep the connection state independent from scan failures.
-                if (BuildConfig.DEBUG) {
-                    Log.w(
-                        TAG,
-                        "battery scan failed window=$windowId errorCode=$errorCode " +
-                            "results=$batteryWindowResultCount targetHits=$batteryWindowTargetCount " +
-                            "exactAddressHits=$batteryWindowExactAddressCount validLevels=$batteryWindowValidLevelCount " +
-                            "target=${batteryScanTargetAddress ?: "any YiLa opener"}",
-                    )
-                }
-                if (batteryScannerCallback === this) {
-                    batteryScannerCallback = null
-                    scheduleBatteryScanRestart()
-                }
-            }
+    private fun finishBatteryScanWindow(windowId: Int) {
+        if (BuildConfig.DEBUG) {
+            Log.d(
+                TAG,
+                "battery scan window=$windowId finished results=$batteryWindowResultCount " +
+                    "targetHits=$batteryWindowTargetCount exactAddressHits=$batteryWindowExactAddressCount " +
+                    "validLevels=$batteryWindowValidLevelCount",
+            )
         }
-        batteryScannerCallback = callback
-        val settingsBuilder = ScanSettings.Builder()
-            .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
-        runCatching {
-            // Match the original app's scanner: every advertisement, aggressive matching,
-            // and no report delay. This matters on HyperOS where the default callback-only
-            // overload is tracked as scanMode=0 and may not deliver the opener advertisement.
-            settingsBuilder
-                .setCallbackType(ScanSettings.CALLBACK_TYPE_ALL_MATCHES)
-                .setMatchMode(ScanSettings.MATCH_MODE_AGGRESSIVE)
-                .setNumOfMatches(ScanSettings.MATCH_NUM_MAX_ADVERTISEMENT)
-                .setReportDelay(0L)
-        }
-        val settings = settingsBuilder.build()
-        runCatching { bleScanner.startScan(null, settings, callback) }.onFailure {
-            if (BuildConfig.DEBUG) {
-                Log.w(TAG, "battery scan start failed window=$windowId: ${it.message}")
-            }
-            if (batteryScannerCallback === callback) batteryScannerCallback = null
-            scheduleBatteryScanRestart()
-        }
-        mainHandler.postDelayed({
-            if (batteryScannerCallback === callback) {
-                if (BuildConfig.DEBUG) {
-                    Log.d(
-                        TAG,
-                        "battery scan window=$windowId finished results=$batteryWindowResultCount " +
-                            "targetHits=$batteryWindowTargetCount exactAddressHits=$batteryWindowExactAddressCount " +
-                            "validLevels=$batteryWindowValidLevelCount",
-                    )
-                }
-                stopBatteryScanWindow()
-                scheduleBatteryScanRestart()
-            }
-        }, batteryScanDurationMs)
     }
 
     @SuppressLint("MissingPermission")
@@ -740,7 +561,7 @@ class BleDoorController(context: Context) {
         val targetAddress = batteryScanTargetAddress
         val name = advertisedName(device, result)
         val rawRecord = result.scanRecord?.bytes
-        val serviceMatch = result.scanRecord?.serviceUuids?.any { it.uuid == SERVICE_UUID } == true
+        val serviceMatch = result.scanRecord?.serviceUuids?.any { it.uuid == BleGattSession.SERVICE_UUID } == true
         val match = BatteryScanMatcher.match(
             address = address,
             targetAddress = targetAddress,
@@ -807,37 +628,15 @@ class BleDoorController(context: Context) {
         _batteryLevels.update { current -> restored + current }
     }
 
-    private fun scheduleBatteryScanRestart() {
-        if (!batteryScanActive || batteryScanRestart != null) return
-        batteryScanRestart = Runnable {
-            batteryScanRestart = null
-            if (!batteryScanActive || !hasBluetoothPermission() || !isBluetoothEnabled()) return@Runnable
-            adapter?.bluetoothLeScanner?.let(::startBatteryScanWindow)
-        }.also { mainHandler.postDelayed(it, 350L) }
-    }
-
-    @SuppressLint("MissingPermission")
-    private fun stopBatteryScanWindow() {
-        val callback = batteryScannerCallback ?: return
-        runCatching { adapter?.bluetoothLeScanner?.stopScan(callback) }
-        batteryScannerCallback = null
-    }
-
     @SuppressLint("MissingPermission")
     fun stopBatteryScan() {
-        batteryScanActive = false
         batteryScanTargetAddress = null
-        batteryScanRestart?.let(mainHandler::removeCallbacks)
-        batteryScanRestart = null
-        stopBatteryScanWindow()
+        batteryScanner.stop()
     }
 
     @SuppressLint("MissingPermission")
     fun stopScan() {
-        discoveryScanActive = false
-        discoveryScanRestart?.let(mainHandler::removeCallbacks)
-        discoveryScanRestart = null
-        stopDiscoveryScanWindow()
+        discoveryScanner.stop()
         if (_state.value == BleState.Scanning) _state.value = BleState.Idle
     }
 
@@ -850,10 +649,8 @@ class BleDoorController(context: Context) {
             return
         }
         cancelOperationTimeout()
-        cancelWriteRetry()
-        cancelDescriptorRetry()
         pendingOperation = PendingOperation.Pairing(normalizedPassword)
-        connectAddress(device.device.address, ConnectionPurpose.PAIRING)
+        connectAddress(device.device.address, BleConnectionPurpose.PAIRING)
     }
 
     @SuppressLint("MissingPermission")
@@ -875,7 +672,7 @@ class BleDoorController(context: Context) {
             return
         }
         pendingOperation = PendingOperation.None
-        connectAddress(address, ConnectionPurpose.EXPLICIT_CONNECT)
+        connectAddress(address, BleConnectionPurpose.EXPLICIT_CONNECT)
     }
 
     fun isConnected(address: String): Boolean =
@@ -888,8 +685,8 @@ class BleDoorController(context: Context) {
     }
 
     @SuppressLint("MissingPermission")
-    private fun connectAddress(address: String, purpose: ConnectionPurpose) {
-        if (!appInForeground && purpose == ConnectionPurpose.PREHEAT) {
+    private fun connectAddress(address: String, purpose: BleConnectionPurpose) {
+        if (!appInForeground && purpose == BleConnectionPurpose.PREHEAT) {
             if (BuildConfig.DEBUG) Log.d(TAG, "BLE_CONNECT skipped=background_preheat")
             return
         }
@@ -908,125 +705,137 @@ class BleDoorController(context: Context) {
             _state.value = BleState.Error(text(R.string.error_address_invalid))
             return
         }
-        beginTiming(purpose, normalizedAddress)
-        logTiming("connect_gatt_start")
-        stopScan()
-        presenceScanRestart?.let(mainHandler::removeCallbacks)
-        presenceScanRestart = null
-        stopPresenceScanWindow()
-        stopBatteryScanWindow()
-        cancelOperationTimeout()
-        cancelConnectionTimeout()
-        _connectionState.value = BleConnectionState.Disconnected
-        closeGatt()
-        val remote = runCatching { adapter?.getRemoteDevice(normalizedAddress) }.getOrNull()
-        if (remote == null) {
-            _state.value = BleState.Error(text(R.string.error_device_not_found, normalizedAddress))
-            restorePresenceAfterLinkFailure(normalizedAddress)
-            return
-        }
-        currentAddress = normalizedAddress
-        _connectionState.value = BleConnectionState.Connecting(normalizedAddress)
-        if (presenceMonitoringActive && presenceProfile?.address.equals(normalizedAddress, ignoreCase = true)) {
-            publishOpenerConnection(OpenerConnectionStatus.CONNECTING, normalizedAddress)
-        }
-        _state.value = if (pendingOperation is PendingOperation.Pairing) {
-            BleState.Pairing(normalizedAddress)
-        } else {
-            BleState.Connecting(normalizedAddress)
-        }
-        gatt = runCatching {
-            if (Build.VERSION.SDK_INT >= 23) {
-                remote.connectGatt(appContext, false, callback, BluetoothDevice.TRANSPORT_LE)
-            } else {
-                remote.connectGatt(appContext, false, callback)
+        val sessionAddress = gattSession.address
+        if (sessionAddress.equals(normalizedAddress, ignoreCase = true)) {
+            if (gattSession.phase == BleConnectionPhase.READY) {
+                publishOpenerConnection(OpenerConnectionStatus.CONNECTED, normalizedAddress)
+                return
             }
-        }.getOrNull()
-        if (gatt == null) {
-            logTiming("connect_gatt_return", "result=null")
-            _connectionState.value = BleConnectionState.Disconnected
-            _state.value = if (pendingOperation is PendingOperation.Pairing) {
-                BleState.Error(text(R.string.error_pairing_connection_timeout))
-            } else {
-                BleState.Error(text(R.string.error_connection_timeout))
-            }
-            restorePresenceAfterLinkFailure(normalizedAddress)
-            return
+            if (gattSession.phase == BleConnectionPhase.CONNECTING) return
         }
-        connectionTimeout = Runnable {
-            connectionTimeout = null
-            if (currentAddress.equals(normalizedAddress, ignoreCase = true) &&
-                _connectionState.value is BleConnectionState.Connecting
-            ) {
-                logTiming("connection_timeout")
-                val pairing = pendingOperation is PendingOperation.Pairing
-                pendingOperation = PendingOperation.None
-                runCatching { gatt?.disconnect() }
-                closeGatt()
-                _connectionState.value = BleConnectionState.Disconnected
-                _state.value = if (pairing) {
-                    BleState.Error(text(R.string.error_pairing_connection_timeout))
-                } else {
-                    BleState.Error(text(R.string.error_connection_timeout))
+        if (gattSession.phase != BleConnectionPhase.DISCONNECTED) {
+            if (purpose == BleConnectionPurpose.PREHEAT) {
+                if (BuildConfig.DEBUG) {
+                    Log.d(
+                        TAG,
+                        "BLE_CONNECT skipped=phase_${gattSession.phase.name.lowercase()} " +
+                            "purpose=${purpose.name.lowercase()} address=$normalizedAddress",
+                    )
                 }
-                restorePresenceAfterLinkFailure(normalizedAddress)
+                return
             }
-        }.also { mainHandler.postDelayed(it, GATT_CONNECTION_TIMEOUT_MS) }
+            queuedExplicitConnect = normalizedAddress to purpose
+            if (BuildConfig.DEBUG) {
+                Log.d(
+                    TAG,
+                    "BLE_CONNECT queued address=$normalizedAddress purpose=${purpose.name.lowercase()} " +
+                        "phase=${gattSession.phase.name.lowercase()}",
+                )
+            }
+            if (gattSession.phase != BleConnectionPhase.RELEASING) {
+                gattSession.release("replace_for_new_address", waitForFreshAdvertisement = false)
+            }
+            return
+        }
+        stopScan()
+        presenceScanner.stop()
+        batteryScanner.stop()
+        cancelOperationTimeout()
+        _connectionState.value = BleConnectionState.Disconnected
+        if (!gattSession.connect(normalizedAddress, purpose)) {
+            if (BuildConfig.DEBUG) {
+                Log.d(
+                    TAG,
+                    "BLE_CONNECT rejected address=$normalizedAddress purpose=${purpose.name.lowercase()} " +
+                        "phase=${gattSession.phase} " +
+                        "waitingForFresh=${gattSession.waitingForFreshAdvertisement}",
+                )
+            }
+        }
     }
 
-    fun unlock(profile: DeviceProfile) {
+    fun unlock(profile: DeviceProfile, onComplete: ((success: Boolean) -> Unit)? = null) {
         if (profile.password.isBlank()) {
-            _state.value = BleState.Error(text(com.juren233.easyopen.R.string.error_password_not_configured))
+            _state.value = BleState.Error(text(R.string.error_password_not_configured))
+            notifyUnlockComplete(onComplete, success = false)
             return
         }
         cancelOperationTimeout()
-        cancelWriteRetry()
-        cancelDescriptorRetry()
-        pendingOperation = PendingOperation.Unlock(profile)
+        pendingOperation = PendingOperation.Unlock(profile, onComplete)
         val address = profile.address.trim().uppercase()
-        val link = _connectionState.value
-        if (link is BleConnectionState.Connected && link.address.equals(address, ignoreCase = true)) {
+        if (gattSession.phase == BleConnectionPhase.READY &&
+            gattSession.address.equals(address, ignoreCase = true)
+        ) {
             sendPendingOperation()
         } else {
-            connectAddress(address, ConnectionPurpose.UNLOCK)
+            connectAddress(address, BleConnectionPurpose.UNLOCK)
         }
     }
 
     @SuppressLint("MissingPermission")
     fun disconnect() {
         if (BuildConfig.DEBUG) Log.d(TAG, "BLE_LIFECYCLE explicit_disconnect")
+        queuedExplicitConnect = null
         backgroundRelease?.let(mainHandler::removeCallbacks)
         backgroundRelease = null
         stopOpenerMonitoring()
         stopBatteryScan()
+        val operation = pendingOperation
         pendingOperation = PendingOperation.None
+        notifyUnlockComplete(operation, success = false)
         cancelOperationTimeout()
-        cancelConnectionTimeout()
-        runCatching { gatt?.disconnect() }
-        closeGatt()
+        gattSession.closeNow("explicit_disconnect", waitForFreshAdvertisement = false)
         _connectionState.value = BleConnectionState.Disconnected
         _state.value = BleState.Idle
     }
 
+    /** Releases the NFC-owned link without discarding the main activity's monitor state. */
     @SuppressLint("MissingPermission")
-    private fun closeGatt() {
-        cancelWriteRetry()
-        cancelDescriptorRetry()
-        runCatching { gatt?.close() }
-        gatt = null
-        writeCharacteristic = null
-        notifyCharacteristic = null
-        currentAddress = null
+    fun releaseAfterNfcUnlock() {
+        if (BuildConfig.DEBUG) {
+            Log.d(
+                TAG,
+                "NFC_BLE release_session monitoring=$presenceMonitoringActive " +
+                    "phase=${gattSession.phase}",
+            )
+        }
+        queuedExplicitConnect = null
+        backgroundRelease?.let(mainHandler::removeCallbacks)
+        backgroundRelease = null
+        val operation = pendingOperation
+        pendingOperation = PendingOperation.None
+        notifyUnlockComplete(operation, success = false)
+        cancelOperationTimeout()
+        gattSession.closeNow(
+            reason = "nfc_complete",
+            waitForFreshAdvertisement = presenceMonitoringActive,
+        )
+        _connectionState.value = BleConnectionState.Disconnected
+        _state.value = BleState.Idle
     }
 
-    @SuppressLint("MissingPermission")
+    private fun notifyUnlockComplete(operation: PendingOperation, success: Boolean) {
+        if (operation is PendingOperation.Unlock) {
+            notifyUnlockComplete(operation.onComplete, success)
+        }
+    }
+
+    private fun notifyUnlockComplete(callback: ((success: Boolean) -> Unit)?, success: Boolean) {
+        if (callback == null) return
+        runCatching { callback(success) }.onFailure { error ->
+            if (BuildConfig.DEBUG) {
+                Log.w(TAG, "NFC_BLE completion_callback_failed: ${error.message}")
+            }
+        }
+    }
+
     private fun sendPendingOperation(restartTimeout: Boolean = true) {
-        val address = currentAddress ?: return
-        val characteristic = writeCharacteristic
-        val connection = gatt
-        if (characteristic == null || connection == null) {
-            val pairing = pendingOperation is PendingOperation.Pairing
+        val address = gattSession.address ?: return
+        if (gattSession.phase != BleConnectionPhase.READY) {
+            val operation = pendingOperation
+            val pairing = operation is PendingOperation.Pairing
             pendingOperation = PendingOperation.None
+            notifyUnlockComplete(operation, success = false)
             _state.value = if (pairing) {
                 BleState.Error(text(R.string.error_pairing_service_not_ready))
             } else {
@@ -1054,6 +863,7 @@ class BleDoorController(context: Context) {
                     UnlockProtocol.buildOpenPacket(operation.profile)
                 } catch (error: IllegalArgumentException) {
                     pendingOperation = PendingOperation.None
+                    notifyUnlockComplete(operation, success = false)
                     _state.value = BleState.Error(error.message ?: text(R.string.error_unlock_parameter_invalid))
                     return
                 }
@@ -1066,11 +876,10 @@ class BleDoorController(context: Context) {
             cancelOperationTimeout()
             operationTimeout = Runnable {
                 operationTimeout = null
-                logTiming("operation_timeout", "timeoutMs=$timeoutMs")
-                cancelWriteRetry()
-                cancelDescriptorRetry()
+                diagnostics.log("operation_timeout", "timeoutMs=$timeoutMs")
                 val operation = pendingOperation
                 pendingOperation = PendingOperation.None
+                notifyUnlockComplete(operation, success = false)
                 _state.value = when (operation) {
                     is PendingOperation.Pairing -> BleState.Error(text(R.string.error_pairing_timeout))
                     else -> BleState.Error(text(R.string.error_unlock_timeout))
@@ -1079,367 +888,52 @@ class BleDoorController(context: Context) {
             }.also { mainHandler.postDelayed(it, timeoutMs) }
         }
 
-        logTiming("command_write_start", "bytes=${packet.size}")
-        try {
-            val status = if (Build.VERSION.SDK_INT >= 33) {
-                connection.writeCharacteristic(
-                    characteristic,
-                    packet,
-                    BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE,
-                )
-            } else {
-                characteristic.writeType = BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
-                characteristic.value = packet
-                if (connection.writeCharacteristic(characteristic)) BluetoothGatt.GATT_SUCCESS else BluetoothGatt.GATT_FAILURE
-            }
-            logTiming("command_write_return", "status=$status")
-            if (status == BluetoothStatusCodes.ERROR_GATT_WRITE_REQUEST_BUSY) {
-                scheduleWriteRetry(connection, characteristic)
-            } else if (status != BluetoothGatt.GATT_SUCCESS) {
-                val pairing = pendingOperation is PendingOperation.Pairing
-                cancelOperationTimeout()
-                cancelWriteRetry()
-                pendingOperation = PendingOperation.None
-                _state.value = if (pairing) {
-                    BleState.Error(text(R.string.error_pairing_write_status, status))
-                } else {
-                    BleState.Error(text(R.string.error_unlock_write_status, status))
-                }
-                scheduleBackgroundRelease("command_write_failed")
-            } else {
-                writeRetryCount = 0
-            }
-        } catch (error: Exception) {
-            val pairing = pendingOperation is PendingOperation.Pairing
+        if (!gattSession.write(packet) && pendingOperation !is PendingOperation.None) {
             cancelOperationTimeout()
-            cancelWriteRetry()
+            val operation = pendingOperation
+            val pairing = operation is PendingOperation.Pairing
             pendingOperation = PendingOperation.None
+            notifyUnlockComplete(operation, success = false)
             _state.value = if (pairing) {
-                BleState.Error(text(R.string.error_pairing_write_exception, error.message ?: text(R.string.error_unknown)))
+                BleState.Error(text(R.string.error_pairing_service_not_ready))
             } else {
-                BleState.Error(text(R.string.error_unlock_write_exception, error.message ?: text(R.string.error_unknown)))
+                BleState.Error(text(R.string.error_unlock_service_not_ready))
             }
-            scheduleBackgroundRelease("command_write_exception")
+            releaseIdleConnection("command_not_accepted")
         }
     }
 
-    private fun scheduleWriteRetry(
-        connection: BluetoothGatt,
-        characteristic: BluetoothGattCharacteristic,
-    ) {
-        if (writeRetryCount >= MAX_WRITE_RETRIES) {
-            val pairing = pendingOperation is PendingOperation.Pairing
-            cancelOperationTimeout()
-            cancelWriteRetry()
-            pendingOperation = PendingOperation.None
-            _state.value = if (pairing) {
-                BleState.Error(text(R.string.error_pairing_write_busy))
-            } else {
-                BleState.Error(text(R.string.error_unlock_write_busy))
-            }
-            return
+    private fun publishConnecting(address: String) {
+        if (presenceMonitoringActive && presenceProfile?.address.equals(address, ignoreCase = true)) {
+            publishOpenerConnection(OpenerConnectionStatus.CONNECTING, address)
         }
-        writeRetryCount += 1
-        writeRetry?.let(mainHandler::removeCallbacks)
-        writeRetry = Runnable {
-            writeRetry = null
-            if (pendingOperation !is PendingOperation.None &&
-                this@BleDoorController.gatt === connection &&
-                writeCharacteristic === characteristic
-            ) {
-                sendPendingOperation(restartTimeout = false)
-            }
-        }.also { mainHandler.postDelayed(it, WRITE_RETRY_DELAY_MS) }
-    }
-
-    private fun cancelWriteRetry() {
-        writeRetry?.let(mainHandler::removeCallbacks)
-        writeRetry = null
-        writeRetryCount = 0
-    }
-
-    private fun scheduleDescriptorRetry(
-        gatt: BluetoothGatt,
-        descriptor: BluetoothGattDescriptor,
-    ) {
-        if (descriptorRetryCount >= MAX_WRITE_RETRIES) {
-            val pairing = pendingOperation is PendingOperation.Pairing
-            cancelDescriptorRetry()
-            cancelOperationTimeout()
-            pendingOperation = PendingOperation.None
-            _state.value = if (pairing) {
-                BleState.Error(text(R.string.error_pairing_notification_busy))
-            } else {
-                BleState.Error(text(R.string.error_unlock_notification_busy))
-            }
-            return
-        }
-        descriptorRetryCount += 1
-        descriptorRetry?.let(mainHandler::removeCallbacks)
-        descriptorRetry = Runnable {
-            descriptorRetry = null
-            if (pendingOperation !is PendingOperation.None && this@BleDoorController.gatt === gatt) {
-                val status = writeNotificationDescriptor(gatt, descriptor)
-                handleDescriptorWriteRequestResult(gatt, descriptor, status)
-            }
-        }.also { mainHandler.postDelayed(it, WRITE_RETRY_DELAY_MS) }
-    }
-
-    private fun cancelDescriptorRetry() {
-        descriptorRetry?.let(mainHandler::removeCallbacks)
-        descriptorRetry = null
-        descriptorRetryCount = 0
-    }
-
-    private fun writeNotificationDescriptor(
-        gatt: BluetoothGatt,
-        descriptor: BluetoothGattDescriptor,
-    ): Int {
-        if (Build.VERSION.SDK_INT >= 31 &&
-            ContextCompat.checkSelfPermission(
-                appContext,
-                Manifest.permission.BLUETOOTH_CONNECT,
-            ) != PackageManager.PERMISSION_GRANTED
-        ) {
-            return BluetoothGatt.GATT_FAILURE
-        }
-        return try {
-            if (Build.VERSION.SDK_INT >= 33) {
-                gatt.writeDescriptor(descriptor, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)
-            } else {
-                descriptor.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
-                if (gatt.writeDescriptor(descriptor)) BluetoothGatt.GATT_SUCCESS else BluetoothGatt.GATT_FAILURE
-            }
-        } catch (_: SecurityException) {
-            BluetoothGatt.GATT_FAILURE
+        _state.value = if (pendingOperation is PendingOperation.Pairing) {
+            BleState.Pairing(address)
+        } else {
+            BleState.Connecting(address)
         }
     }
 
-    private fun handleDescriptorWriteRequestResult(
-        gatt: BluetoothGatt,
-        descriptor: BluetoothGattDescriptor,
-        status: Int,
-    ) {
-        when {
-            status == BluetoothGatt.GATT_SUCCESS -> descriptorRetryCount = 0
-            status == BluetoothStatusCodes.ERROR_GATT_WRITE_REQUEST_BUSY -> scheduleDescriptorRetry(gatt, descriptor)
-            else -> {
-                // Keep the original compatibility fallback for non-busy CCCD failures.
-                cancelDescriptorRetry()
-                markReady()
-            }
-        }
-    }
-
-    private fun cancelConnectionTimeout() {
-        connectionTimeout?.let(mainHandler::removeCallbacks)
-        connectionTimeout = null
-    }
-
-    private fun cancelOperationTimeout() {
-        operationTimeout?.let(mainHandler::removeCallbacks)
-        operationTimeout = null
-    }
-
-    @SuppressLint("MissingPermission")
-    private fun failConnection(address: String, message: String) {
-        logTiming("connection_failed", "message=${message.replace(' ', '_')}")
-        cancelConnectionTimeout()
-        cancelOperationTimeout()
-        cancelWriteRetry()
-        cancelDescriptorRetry()
-        pendingOperation = PendingOperation.None
-        runCatching { gatt?.disconnect() }
-        closeGatt()
-        _connectionState.value = BleConnectionState.Disconnected
-        _state.value = BleState.Error(message)
-        restorePresenceAfterLinkFailure(address)
-    }
-
-    private val callback = object : BluetoothGattCallback() {
-        @SuppressLint("MissingPermission")
-        override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
-            if (this@BleDoorController.gatt !== gatt) return
-            val address = runCatching { gatt.device.address }.getOrNull()?.uppercase() ?: currentAddress.orEmpty()
-            logTiming("connection_state", "status=$status newState=$newState")
-            if (newState == BluetoothProfile.STATE_CONNECTED && status == BluetoothGatt.GATT_SUCCESS) {
-                cancelConnectionTimeout()
-                logTiming("gatt_connected")
-                this@BleDoorController.gatt = gatt
-                currentAddress = address
-                _connectionState.value = BleConnectionState.Connecting(address)
-                if (presenceMonitoringActive && presenceProfile?.address.equals(address, ignoreCase = true)) {
-                    publishOpenerConnection(OpenerConnectionStatus.CONNECTING, address)
-                }
-                _state.value = if (pendingOperation is PendingOperation.Pairing) {
-                    BleState.Pairing(address)
-                } else {
-                    BleState.Connecting(address)
-                }
-                val priorityRequested = runCatching {
-                    gatt.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH)
-                }.getOrDefault(false)
-                logTiming("connection_priority", "requested=$priorityRequested")
-                logTiming("mtu_request_start", "requested=100")
-                if (!runCatching { gatt.requestMtu(100) }.getOrDefault(false)) {
-                    logTiming("mtu_request_return", "accepted=false fallback=discover_services")
-                    mainHandler.postDelayed({
-                        if (this@BleDoorController.gatt === gatt) {
-                            logTiming("service_discovery_start", "source=mtu_fallback")
-                            runCatching { gatt.discoverServices() }
-                        }
-                    }, 300)
-                } else {
-                    logTiming("mtu_request_return", "accepted=true")
-                }
-            } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
-                logTiming("gatt_disconnected", "status=$status")
-                cancelConnectionTimeout()
-                val operation = pendingOperation
-                _connectionState.value = BleConnectionState.Disconnected
-                cancelOperationTimeout()
-                cancelWriteRetry()
-                cancelDescriptorRetry()
-                writeCharacteristic = null
-                notifyCharacteristic = null
-                if (operation !is PendingOperation.None) {
-                    val pairing = operation is PendingOperation.Pairing
-                    pendingOperation = PendingOperation.None
-                    _state.value = if (pairing) {
-                        BleState.Error(text(R.string.error_pairing_connection_lost, status))
-                    } else {
-                        BleState.Error(text(R.string.error_unlock_connection_lost, status))
-                    }
-                } else if (_state.value !is BleState.Success && _state.value !is BleState.Paired) {
-                    _state.value = BleState.Error(text(R.string.error_connection_lost, status))
-                }
-                closeGatt()
-                restorePresenceAfterLinkFailure(address)
-            }
-        }
-
-        override fun onMtuChanged(gatt: BluetoothGatt, mtu: Int, status: Int) {
-            if (this@BleDoorController.gatt !== gatt) return
-            logTiming("mtu_changed", "mtu=$mtu status=$status")
-            if (Build.VERSION.SDK_INT >= 31 &&
-                ContextCompat.checkSelfPermission(
-                    appContext,
-                    Manifest.permission.BLUETOOTH_CONNECT,
-                ) != PackageManager.PERMISSION_GRANTED
-            ) {
-                return
-            }
-            try {
-                logTiming("service_discovery_start", "source=mtu_callback")
-                gatt.discoverServices()
-            } catch (_: SecurityException) {
-                // Permission can be revoked between the explicit check and the callback.
-            }
-        }
-
-        @SuppressLint("MissingPermission")
-        override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
-            if (this@BleDoorController.gatt !== gatt) return
-            logTiming("services_discovered", "status=$status")
-            val address = currentAddress.orEmpty()
-            if (status != BluetoothGatt.GATT_SUCCESS) {
-                val pairing = pendingOperation is PendingOperation.Pairing
-                failConnection(
-                    address,
-                    if (pairing) {
-                        text(R.string.error_pairing_services_failed, status)
-                    } else {
-                        text(R.string.error_services_failed, status)
-                    },
-                )
-                return
-            }
-            val service = gatt.getService(SERVICE_UUID)
-            writeCharacteristic = service?.getCharacteristic(WRITE_UUID)
-            notifyCharacteristic = service?.getCharacteristic(NOTIFY_UUID)
-            if (service == null || writeCharacteristic == null || notifyCharacteristic == null) {
-                val pairing = pendingOperation is PendingOperation.Pairing
-                failConnection(
-                    address,
-                    if (pairing) text(R.string.error_pairing_service_missing) else text(R.string.error_service_missing),
-                )
-                return
-            }
-            val notificationEnabled = gatt.setCharacteristicNotification(notifyCharacteristic, true)
-            logTiming("notification_local", "enabled=$notificationEnabled")
-            if (!notificationEnabled) {
-                val pairing = pendingOperation is PendingOperation.Pairing
-                failConnection(
-                    address,
-                    if (pairing) {
-                        text(R.string.error_pairing_notifications_failed)
-                    } else {
-                        text(R.string.error_notifications_failed)
-                    },
-                )
-                return
-            }
-            val descriptor = notifyCharacteristic?.getDescriptor(CCCD_UUID)
-            if (descriptor == null) {
-                markReady()
-                return
-            }
-            logTiming("cccd_write_start")
-            val descriptorStatus = writeNotificationDescriptor(gatt, descriptor)
-            logTiming("cccd_write_return", "status=$descriptorStatus")
-            // A busy descriptor write must finish before the password characteristic can be written.
-            handleDescriptorWriteRequestResult(gatt, descriptor, descriptorStatus)
-        }
-
-        override fun onDescriptorWrite(gatt: BluetoothGatt, descriptor: BluetoothGattDescriptor, status: Int) {
-            if (this@BleDoorController.gatt !== gatt) return
-            logTiming("cccd_write_complete", "status=$status uuid=${descriptor.uuid}")
-            if (status == BluetoothGatt.GATT_SUCCESS) {
-                cancelDescriptorRetry()
-                markReady()
-            } else if (status == BluetoothStatusCodes.ERROR_GATT_WRITE_REQUEST_BUSY) {
-                scheduleDescriptorRetry(gatt, descriptor)
-            } else {
-                // Preserve the original compatibility fallback for non-busy descriptor failures.
-                cancelDescriptorRetry()
-                markReady()
-            }
-        }
-
-        override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
-            if (this@BleDoorController.gatt !== gatt) return
-            if (characteristic.uuid == NOTIFY_UUID) onResponse(characteristic.value)
-        }
-
-        override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, value: ByteArray) {
-            if (this@BleDoorController.gatt !== gatt) return
-            if (characteristic.uuid == NOTIFY_UUID) onResponse(value)
-        }
-    }
-
-    private fun markReady() {
-        val address = currentAddress ?: return
-        cancelConnectionTimeout()
-        logTiming("ready")
+    private fun handleGattReady(address: String) {
+        diagnostics.log("controller_ready", overrideAddress = address)
         _connectionState.value = BleConnectionState.Connected(address)
         if (presenceMonitoringActive && presenceProfile?.address.equals(address, ignoreCase = true)) {
             publishOpenerConnection(OpenerConnectionStatus.CONNECTED, address)
         }
-        if (pendingOperation is PendingOperation.Pairing) {
-            sendPendingOperation()
-        } else if (pendingOperation is PendingOperation.Unlock) {
+        if (pendingOperation !is PendingOperation.None) {
             sendPendingOperation()
         } else {
             _state.value = BleState.Ready(address)
         }
     }
 
-    private fun onResponse(bytes: ByteArray) {
-        logTiming("response", "bytes=${bytes.size} summary=${UnlockProtocol.responseSummary(bytes)}")
+    private fun handleGattResponse(bytes: ByteArray) {
+        diagnostics.log(
+            "response",
+            "bytes=${bytes.size} summary=${UnlockProtocol.responseSummary(bytes)}",
+        )
         cancelOperationTimeout()
-        cancelWriteRetry()
-        cancelDescriptorRetry()
-        val address = currentAddress.orEmpty()
+        val address = gattSession.address.orEmpty()
         val operation = pendingOperation
         pendingOperation = PendingOperation.None
         when (operation) {
@@ -1458,16 +952,117 @@ class BleDoorController(context: Context) {
             }
             is PendingOperation.Unlock -> {
                 val summary = UnlockProtocol.responseSummary(bytes)
-                _state.value = if (UnlockProtocol.isSuccess(bytes)) {
+                val success = UnlockProtocol.isSuccess(bytes)
+                _state.value = if (success) {
                     BleState.Success(text(R.string.unlock_success, summary))
                 } else {
                     BleState.Error(text(R.string.error_opener_response, summary))
                 }
+                notifyUnlockComplete(operation, success)
             }
-            PendingOperation.None -> {
-                _state.value = BleState.Ready(address)
-            }
+            PendingOperation.None -> _state.value = BleState.Ready(address)
         }
         scheduleBackgroundRelease("background_operation_complete")
     }
+
+    private fun handleGattFailure(
+        address: String,
+        purpose: BleConnectionPurpose,
+        failure: BleGattFailure,
+    ) {
+        if (BuildConfig.DEBUG) Log.d(TAG, "BLE_FAILURE purpose=${purpose.name.lowercase()} failure=$failure")
+        val operation = pendingOperation
+        val pairing = operation is PendingOperation.Pairing
+        pendingOperation = PendingOperation.None
+        notifyUnlockComplete(operation, success = false)
+        _state.value = when (failure) {
+            BleGattFailure.ConnectionStartFailed,
+            BleGattFailure.ConnectionTimeout,
+            -> if (pairing) {
+                BleState.Error(text(R.string.error_pairing_connection_timeout))
+            } else {
+                BleState.Error(text(R.string.error_connection_timeout))
+            }
+            is BleGattFailure.UnexpectedDisconnect -> when (operation) {
+                is PendingOperation.Pairing -> BleState.Error(text(R.string.error_pairing_connection_lost, failure.status))
+                is PendingOperation.Unlock -> BleState.Error(text(R.string.error_unlock_connection_lost, failure.status))
+                PendingOperation.None -> BleState.Error(text(R.string.error_connection_lost, failure.status))
+            }
+            is BleGattFailure.ServicesFailed -> if (pairing) {
+                BleState.Error(text(R.string.error_pairing_services_failed, failure.status))
+            } else {
+                BleState.Error(text(R.string.error_services_failed, failure.status))
+            }
+            BleGattFailure.ServiceMissing -> if (pairing) {
+                BleState.Error(text(R.string.error_pairing_service_missing))
+            } else {
+                BleState.Error(text(R.string.error_service_missing))
+            }
+            BleGattFailure.NotificationsFailed -> if (pairing) {
+                BleState.Error(text(R.string.error_pairing_notifications_failed))
+            } else {
+                BleState.Error(text(R.string.error_notifications_failed))
+            }
+            is BleGattFailure.WriteStatus -> if (pairing) {
+                BleState.Error(text(R.string.error_pairing_write_status, failure.status))
+            } else {
+                BleState.Error(text(R.string.error_unlock_write_status, failure.status))
+            }
+            is BleGattFailure.WriteException -> if (pairing) {
+                BleState.Error(text(R.string.error_pairing_write_exception, failure.message))
+            } else {
+                BleState.Error(text(R.string.error_unlock_write_exception, failure.message))
+            }
+            BleGattFailure.WriteBusy -> if (pairing) {
+                BleState.Error(text(R.string.error_pairing_write_busy))
+            } else {
+                BleState.Error(text(R.string.error_unlock_write_busy))
+            }
+            BleGattFailure.NotificationBusy -> if (pairing) {
+                BleState.Error(text(R.string.error_pairing_notification_busy))
+            } else {
+                BleState.Error(text(R.string.error_unlock_notification_busy))
+            }
+        }
+        scheduleBackgroundRelease("failure")
+    }
+
+    private fun handleGattReleased(address: String, purpose: BleConnectionPurpose, reason: String) {
+        if (BuildConfig.DEBUG) {
+            Log.d(
+                TAG,
+                "BLE_RELEASED address=${address.ifBlank { "unknown" }} " +
+                    "purpose=${purpose.name.lowercase()} reason=$reason " +
+                    "waitingForFresh=${gattSession.waitingForFreshAdvertisement}",
+            )
+        }
+        _connectionState.value = BleConnectionState.Disconnected
+        if (_state.value is BleState.Connecting || _state.value is BleState.Ready) {
+            _state.value = BleState.Idle
+        }
+        val queued = queuedExplicitConnect
+        val queuedCanRunInBackground = queued?.second == BleConnectionPurpose.UNLOCK ||
+            queued?.second == BleConnectionPurpose.PAIRING
+        if (queued != null && (appInForeground || queuedCanRunInBackground)) {
+            if (BuildConfig.DEBUG) {
+                Log.d(
+                    TAG,
+                    "BLE_CONNECT dequeue_after_release address=${queued.first} " +
+                        "purpose=${queued.second.name.lowercase()} foreground=$appInForeground",
+                )
+            }
+            queuedExplicitConnect = null
+            connectAddress(queued.first, queued.second)
+            return
+        }
+        if (presenceMonitoringActive &&
+            reason != "monitoring_stopped" && reason != "explicit_disconnect"
+        ) {
+            presenceLastRssi = null
+            presenceLastSeenAtMs = 0L
+            publishOpenerConnection(OpenerConnectionStatus.NOT_FOUND, presenceProfile?.address.orEmpty())
+            if (appInForeground) startPresenceScanWindow()
+        }
+    }
+
 }

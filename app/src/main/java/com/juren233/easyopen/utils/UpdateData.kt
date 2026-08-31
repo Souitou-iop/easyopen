@@ -14,13 +14,16 @@ import java.net.URL
 data class AvailableUpdate(
     val versionName: String,
     val versionCode: Long,
+    val releaseUrl: String = "https://github.com/juren233/easyopen/releases/latest",
 ) {
-    val displayVersion: String = "v$versionName-$versionCode"
+    /** The banner intentionally shows the human-facing version, not the internal build number. */
+    val displayVersion: String = "v$versionName"
 }
 
 @Serializable
 private data class GitHubLatestRelease(
     @SerialName("tag_name") val tagName: String,
+    @SerialName("html_url") val htmlUrl: String? = null,
     val assets: List<GitHubReleaseAsset> = emptyList(),
 )
 
@@ -33,6 +36,8 @@ private data class GitHubReleaseAsset(
 object UpdateData {
     private const val LATEST_RELEASE_API =
         "https://api.github.com/repos/juren233/easyopen/releases/latest"
+    private const val LATEST_RELEASE_PAGE =
+        "https://github.com/juren233/easyopen/releases/latest"
     private val json = Json { ignoreUnknownKeys = true }
 
     private val _availableUpdate = MutableStateFlow<AvailableUpdate?>(null)
@@ -81,7 +86,11 @@ object UpdateData {
                 versionName = versionName,
             ) ?: return@withContext null
 
-            AvailableUpdate(versionName = versionName, versionCode = versionCode)
+            AvailableUpdate(
+                versionName = versionName,
+                versionCode = versionCode,
+                releaseUrl = release.htmlUrl ?: LATEST_RELEASE_PAGE,
+            )
         } finally {
             connection.disconnect()
         }

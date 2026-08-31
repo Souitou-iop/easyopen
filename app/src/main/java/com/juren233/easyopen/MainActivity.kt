@@ -40,9 +40,10 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        controller = BleDoorController(this)
+        controller = (application as EasyOpenApplication).bleDoorController
         nfcReader = NfcTagReader(this)
         permissionsGranted = controller.hasBluetoothPermission()
+        Log.i(TAG, "BLE_OWNER controller=${System.identityHashCode(controller)} pid=${android.os.Process.myPid()}")
         Log.i(
             TAG,
             "onCreate action=${intent?.action} hasTag=${nfcReader.hasTag(intent)} " +
@@ -94,6 +95,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onStart() {
         super.onStart()
+        Log.d(TAG, "BLE_LIFECYCLE onStart controller=${System.identityHashCode(controller)}")
         controller.enterForeground()
         updateCheckJob?.cancel()
         updateCheckJob = updateCheckScope.launch {
@@ -115,6 +117,7 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onStop() {
+        Log.d(TAG, "BLE_LIFECYCLE onStop controller=${System.identityHashCode(controller)}")
         controller.enterBackground()
         super.onStop()
     }
@@ -122,7 +125,6 @@ class MainActivity : ComponentActivity() {
     override fun onDestroy() {
         updateCheckScope.cancel()
         nfcReader.close()
-        controller.disconnect()
         super.onDestroy()
     }
 
