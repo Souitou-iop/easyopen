@@ -19,7 +19,6 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.State
 import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -27,6 +26,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
@@ -39,7 +39,6 @@ import com.juren233.easyopen.ble.BleState
 import com.juren233.easyopen.ble.OpenerConnectionStatus
 import com.juren233.easyopen.data.DeviceProfile
 import com.juren233.easyopen.data.DeviceStore
-import com.juren233.easyopen.nfc.NfcWriteRequest
 import com.juren233.easyopen.utils.UpdateData
 import top.yukonga.miuix.kmp.basic.BasicComponent
 import top.yukonga.miuix.kmp.basic.Button
@@ -58,7 +57,6 @@ import top.yukonga.miuix.kmp.icon.extended.Scan
 import top.yukonga.miuix.kmp.icon.extended.Settings
 import top.yukonga.miuix.kmp.icon.extended.Share
 import top.yukonga.miuix.kmp.theme.MiuixTheme
-import top.yukonga.miuix.kmp.window.WindowDialog
 
 @Composable
 internal fun HomePage(
@@ -71,21 +69,11 @@ internal fun HomePage(
     onOpenScanner: () -> Unit,
     onOpenSettings: () -> Unit,
     onProfileChange: (DeviceProfile) -> Unit,
-    nfcWriteWaiting: Boolean,
-    nfcWriteRequest: NfcWriteRequest?,
-    nfcWriting: Boolean,
     onNfcWriteRequested: () -> Unit,
-    onNfcWriteChoice: (Boolean) -> Unit,
-    onNfcWriteCancelled: () -> Unit,
 ) {
     val activeProfile by activeProfileState
     val scrollBehavior = MiuixScrollBehavior()
     val listState = rememberLazyListState()
-    val showTitle by remember(listState) {
-        derivedStateOf {
-            listState.firstVisibleItemIndex > 0 || listState.firstVisibleItemScrollOffset > 32
-        }
-    }
     var showDeviceChooser by rememberSaveable { mutableStateOf(false) }
     var showSettings by rememberSaveable { mutableStateOf(false) }
     var showShareChooser by rememberSaveable { mutableStateOf(false) }
@@ -121,8 +109,7 @@ internal fun HomePage(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = if (showTitle) stringResource(R.string.home_title) else "",
-                largeTitle = stringResource(R.string.home_title),
+                title = stringResource(R.string.home_title),
                 scrollBehavior = scrollBehavior,
                 navigationIcon = {
                     IconButton(onClick = onOpenScanner) {
@@ -151,7 +138,9 @@ internal fun HomePage(
     ) { innerPadding ->
         LazyColumn(
             state = listState,
-            modifier = Modifier.fillMaxSize(),
+            modifier = Modifier
+                .nestedScroll(scrollBehavior.nestedScrollConnection)
+                .fillMaxSize(),
             contentPadding = PaddingValues(
                 top = innerPadding.calculateTopPadding(),
                 bottom = innerPadding.calculateBottomPadding() + 28.dp,
@@ -307,7 +296,6 @@ internal fun HomePage(
                                 MiuixTextButton(
                                     text = stringResource(R.string.nfc_write_title),
                                     onClick = onNfcWriteRequested,
-                                    enabled = !nfcWriting && !nfcWriteWaiting,
                                     modifier = Modifier.fillMaxWidth(),
                                     colors = ButtonDefaults.textButtonColors(),
                                 )
@@ -334,63 +322,6 @@ internal fun HomePage(
                     }
                 }
             }
-        }
-    }
-
-    if (nfcWriteWaiting) {
-        WindowDialog(
-            title = stringResource(R.string.nfc_write_waiting_title),
-            show = true,
-            onDismissRequest = onNfcWriteCancelled,
-        ) {
-            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                MiuixText(text = stringResource(R.string.nfc_write_waiting_description))
-                MiuixTextButton(
-                    text = stringResource(R.string.cancel),
-                    onClick = onNfcWriteCancelled,
-                    modifier = Modifier.fillMaxWidth(),
-                )
-            }
-        }
-    }
-    nfcWriteRequest?.let { request ->
-        val originalRecordCount = request.originalMessage?.records?.size ?: 0
-        WindowDialog(
-            title = stringResource(R.string.nfc_write_choice_title),
-            show = true,
-            onDismissRequest = onNfcWriteCancelled,
-        ) {
-            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                MiuixText(
-                    text = if (originalRecordCount > 0) {
-                        stringResource(R.string.nfc_write_choice_description, originalRecordCount)
-                    } else {
-                        stringResource(R.string.nfc_write_choice_empty)
-                    },
-                )
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                    MiuixTextButton(
-                        text = stringResource(R.string.nfc_write_without_original),
-                        onClick = { onNfcWriteChoice(false) },
-                        modifier = Modifier.weight(1f),
-                    )
-                    MiuixTextButton(
-                        text = stringResource(R.string.nfc_write_preserve_original),
-                        onClick = { onNfcWriteChoice(true) },
-                        modifier = Modifier.weight(1f),
-                        colors = ButtonDefaults.textButtonColorsPrimary(),
-                    )
-                }
-            }
-        }
-    }
-    if (nfcWriting) {
-        WindowDialog(
-            title = stringResource(R.string.nfc_write_in_progress_title),
-            show = true,
-            onDismissRequest = {},
-        ) {
-            MiuixText(text = stringResource(R.string.nfc_write_in_progress_description))
         }
     }
 

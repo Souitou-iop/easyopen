@@ -49,7 +49,7 @@ android {
         minSdk = 26
         targetSdk = 37
         versionCode = 37
-        versionName = ciVersionName ?: "1.0.0-canary"
+        versionName = ciVersionName ?: "1.0.0-beta"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
@@ -70,7 +70,8 @@ android {
         }
         release {
             releaseSigning?.let { signingConfig = it }
-            isMinifyEnabled = false
+            isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",

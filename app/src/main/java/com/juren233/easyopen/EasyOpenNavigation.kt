@@ -21,7 +21,6 @@ import com.juren233.easyopen.ui.HomePage
 import com.juren233.easyopen.ui.PairingPage
 import com.juren233.easyopen.ui.QrImportPage
 import com.juren233.easyopen.ui.SettingsPage
-import com.juren233.easyopen.nfc.NfcWriteRequest
 
 @Composable
 internal fun EasyOpenNavigation(
@@ -37,12 +36,7 @@ internal fun EasyOpenNavigation(
     onProfileChange: (DeviceProfile) -> Unit,
     onImported: (List<DeviceProfile>) -> Unit,
     onSettingsChange: (AppSettings) -> Unit,
-    nfcWriteWaiting: Boolean,
-    nfcWriteRequest: NfcWriteRequest?,
-    nfcWriting: Boolean,
     onNfcWriteRequested: () -> Unit,
-    onNfcWriteChoice: (Boolean) -> Unit,
-    onNfcWriteCancelled: () -> Unit,
     onRestore: (TransferCodec.BackupSnapshot) -> Unit,
 ) {
     val backStack = rememberNavBackStack(EasyOpenRoute.Home)
@@ -86,13 +80,8 @@ internal fun EasyOpenNavigation(
         onProfileChange,
         onImported,
         onSettingsChange,
-        onRestore,
-        nfcWriteWaiting,
-        nfcWriteRequest,
-        nfcWriting,
         onNfcWriteRequested,
-        onNfcWriteChoice,
-        onNfcWriteCancelled,
+        onRestore,
     ) {
         entryProvider<NavKey> {
             entry<EasyOpenRoute.Home> {
@@ -106,12 +95,7 @@ internal fun EasyOpenNavigation(
                     onOpenScanner = { navigator.navigate(EasyOpenRoute.ScanImport) },
                     onOpenSettings = { navigator.navigate(EasyOpenRoute.Settings) },
                     onProfileChange = onProfileChange,
-                    nfcWriteWaiting = nfcWriteWaiting,
-                    nfcWriteRequest = nfcWriteRequest,
-                    nfcWriting = nfcWriting,
                     onNfcWriteRequested = onNfcWriteRequested,
-                    onNfcWriteChoice = onNfcWriteChoice,
-                    onNfcWriteCancelled = onNfcWriteCancelled,
                 )
             }
             entry<EasyOpenRoute.AddDevice> {

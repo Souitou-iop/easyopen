@@ -23,6 +23,7 @@ import com.juren233.easyopen.nfc.NfcTagEvent
 import com.juren233.easyopen.nfc.NfcWriteRequest
 import com.juren233.easyopen.nfc.NfcReaderState
 import com.juren233.easyopen.nfc.NfcTagWriter
+import com.juren233.easyopen.ui.NfcWriteDialogs
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.StateFlow
@@ -150,7 +151,7 @@ internal fun EasyOpenContent(
         }
     }
 
-    fun requestNfcWrite() {
+    val latestRequestNfcWrite = rememberUpdatedState<() -> Unit> {
         when {
             !nfcState.supported -> Toast.makeText(
                 context,
@@ -169,6 +170,7 @@ internal fun EasyOpenContent(
             }
         }
     }
+    val requestNfcWrite = remember { { latestRequestNfcWrite.value() } }
 
     fun chooseNfcWriteMode(preserveOriginal: Boolean) {
         val request = nfcWriteRequest ?: return
@@ -279,17 +281,7 @@ internal fun EasyOpenContent(
                 },
                 onImported = ::importDevices,
                 onSettingsChange = onSettingsChange,
-                nfcWriteWaiting = nfcWriteWaiting,
-                nfcWriteRequest = nfcWriteRequest,
-                nfcWriting = nfcWriting,
-                onNfcWriteRequested = ::requestNfcWrite,
-                onNfcWriteChoice = ::chooseNfcWriteMode,
-                onNfcWriteCancelled = {
-                    if (!nfcWriting) {
-                        nfcWriteWaiting = false
-                        nfcWriteRequest = null
-                    }
-                },
+                onNfcWriteRequested = requestNfcWrite,
                 onRestore = { snapshot ->
                     persistDevices(snapshot.devices, snapshot.activeAddress)
                     onSettingsChange(
@@ -306,6 +298,22 @@ internal fun EasyOpenContent(
             )
         }
     }
+
+    // Keep NFC dialogs outside Navigation 3 entries. A remembered nav entry
+    // can retain its content while the root state changes; rendering the
+    // dialogs here makes waiting/choice/cancel transitions immediate.
+    NfcWriteDialogs(
+        waiting = nfcWriteWaiting,
+        request = nfcWriteRequest,
+        writing = nfcWriting,
+        onChoice = ::chooseNfcWriteMode,
+        onCancel = {
+            if (!nfcWriting) {
+                nfcWriteWaiting = false
+                nfcWriteRequest = null
+            }
+        },
+    )
 
     @Suppress("UNUSED_VARIABLE")
     val ignored = scannedDevices
