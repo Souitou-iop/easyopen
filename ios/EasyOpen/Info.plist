@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleExecutable</key><string>$(EXECUTABLE_NAME)</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+<key>CFBundleDisplayName</key><string>EasyOpen</string>
+<key>CFBundleName</key><string>EasyOpen</string>
+<key>CFBundleIdentifier</key><string>com.ebato.easyopen</string>
+<key>CFBundleShortVersionString</key><string>1.0.0</string>
+<key>CFBundleVersion</key><string>1</string>
+<key>LSRequiresIPhoneOS</key><true/>
+<key>UIRequiresFullScreen</key><true/>
+<key>UISupportedInterfaceOrientations</key><array><string>UIInterfaceOrientationPortrait</string></array>
+<key>UISupportedInterfaceOrientations~ipad</key><array><string>UIInterfaceOrientationPortrait</string></array>
+<key>NSBluetoothAlwaysUsageDescription</key><string>EasyOpen 需要蓝牙连接附近的开锁器。</string>
+<key>NSCameraUsageDescription</key><string>EasyOpen 需要使用相机扫描设备分享二维码。</string>
+<key>NSPhotoLibraryUsageDescription</key><string>EasyOpen 需要从相册选择二维码照片。</string>
+<key>NFCReaderUsageDescription</key><string>EasyOpen 可使用 NFC 标签触发快捷指令开锁。</string>
+<key>UILaunchScreen</key><dict><key>UIColorName</key><string></string></dict>
+<key>UIBackgroundModes</key><array><string>bluetooth-central</string></array>
+<key>CFBundleURLTypes</key><array><dict><key>CFBundleURLName</key><string>com.ebato.easyopen</string><key>CFBundleURLSchemes</key><array><string>easyopen</string></array></dict></array>
+<key>UIApplicationSceneManifest</key><dict><key>UIApplicationSupportsMultipleScenes</key><false/><key>UISceneConfigurations</key><dict><key>UIWindowSceneSessionRoleApplication</key><array><dict><key>UISceneConfigurationName</key><string>Default Configuration</string></dict></array></dict></dict>
+</dict></plist>
