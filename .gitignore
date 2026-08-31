@@ -20,3 +20,11 @@ extracted/device-verify/installed-path.txt
 extracted/jadx.log
 extracted/manifest-tree.txt
 extracted/single.log
+
+# Local build outputs, archives, logs, and exported design sources.
+artifacts/
+.local/
+docs/design-sources/
+.DS_Store
+build-*/
+.codegraph/

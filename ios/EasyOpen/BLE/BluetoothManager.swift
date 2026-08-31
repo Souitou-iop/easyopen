@@ -105,7 +105,7 @@ import CoreBluetooth
     }
 
     func autoConnect(profile: DeviceProfile, minimumRSSI: Int = -90) {
-        guard let target = profile.peripheralIdentifier, central.state == .poweredOn, !operationInFlight, !reconnectingForForeground else { return }
+        guard !hasUsableConnection(for: profile), let target = profile.peripheralIdentifier, central.state == .poweredOn, !operationInFlight, !reconnectingForForeground else { return }
         autoConnectTarget = target; autoConnectThreshold = minimumRSSI
         state = .scanning
         central.scanForPeripherals(withServices: nil, options: [CBCentralManagerScanOptionAllowDuplicatesKey: false])
@@ -117,7 +117,7 @@ import CoreBluetooth
 
     func stopScan() {
         central.stopScan(); autoConnectTarget = nil; shouldScanWhenPoweredOn = false
-        if state == .scanning { state = .discovered }
+        if state == .scanning, !hasUsableConnection { state = .discovered }
     }
 
     func connect(_ p: CBPeripheral) async throws {
@@ -380,7 +380,7 @@ extension BluetoothManager: CBCentralManagerDelegate {
                 self.pendingPeripheralID = nil
                 self.central.stopScan()
             }
-            self.state = .discovered
+            if !self.hasUsableConnection { self.state = .discovered }
             if self.autoConnectTarget == p.identifier, RSSI.intValue >= self.autoConnectThreshold, !self.operationInFlight {
                 self.autoConnectTarget = nil
                 Task { try? await self.connect(p) }

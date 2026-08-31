@@ -6,8 +6,8 @@
 <key>CFBundleDisplayName</key><string>EasyOpen</string>
 <key>CFBundleName</key><string>EasyOpen</string>
 <key>CFBundleIdentifier</key><string>com.ebato.easyopen</string>
-<key>CFBundleShortVersionString</key><string>1.0.3</string>
-<key>CFBundleVersion</key><string>49</string>
+<key>CFBundleShortVersionString</key><string>1.0.4</string>
+<key>CFBundleVersion</key><string>50</string>
 <key>LSRequiresIPhoneOS</key><true/>
 <key>UIRequiresFullScreen</key><true/>
 <key>UISupportedInterfaceOrientations</key><array><string>UIInterfaceOrientationPortrait</string></array>

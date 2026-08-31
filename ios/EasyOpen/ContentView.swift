@@ -187,6 +187,8 @@ struct HomeView: View {
     @Bindable var bluetooth: BluetoothManager
     @State private var error: String?
     @State private var isUnlocking = false
+    @State private var successFeedbackTrigger = 0
+    @State private var failureFeedbackTrigger = 0
 
     private var currentState: LockVisualState {
         switch bluetooth.state {
@@ -203,6 +205,8 @@ struct HomeView: View {
                     deviceHeader(profile)
                     LockActionCard(state: currentState, action: { Task { await unlock(profile) } })
                         .disabled(isUnlocking)
+                        .sensoryFeedback(.success, trigger: successFeedbackTrigger)
+                        .sensoryFeedback(.error, trigger: failureFeedbackTrigger)
                     statusCard(profile)
                 } else {
                     ContentUnavailableView("尚未添加开锁器", systemImage: "lock.slash", description: Text("请先在设定页添加设备。"))
@@ -213,7 +217,7 @@ struct HomeView: View {
             .padding(.top, 12)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             .background(Color(uiColor: .systemGroupedBackground))
-            .navigationTitle("开锁")
+            .navigationTitle("EasyOpen")
             .toolbar { ToolbarItem(placement: .topBarTrailing) { connectionMenu } }
         }
     }
@@ -230,7 +234,7 @@ struct HomeView: View {
             }
             HStack(spacing: 8) {
                 StatusPill(title: error ?? bluetooth.state.label, icon: error == nil ? nil : "exclamationmark.triangle.fill", color: error == nil ? statusColor : .red)
-                if let battery = profile.batteryLevel { StatusPill(title: "电量 \(battery)/5", icon: batteryIcon(battery), color: .secondary) }
+                if let battery = profile.batteryLevel { StatusPill(title: battery.batteryLabel, icon: batteryIcon(battery), color: .secondary) }
             }
         }
     }
@@ -287,7 +291,11 @@ struct HomeView: View {
             if bluetooth.state != .ready { try await bluetooth.connectIfNeeded(profile: profile) }
             guard let password = store.password(for: profile), !password.isEmpty else { throw AppError.invalidPassword }
             try await bluetooth.unlock(profile: profile, password: password)
-        } catch { self.error = error.localizedDescription }
+            successFeedbackTrigger += 1
+        } catch {
+            self.error = error.localizedDescription
+            failureFeedbackTrigger += 1
+        }
     }
 }
 
@@ -316,8 +324,7 @@ private struct LockActionCard: View {
             .background(.background, in: RoundedRectangle(cornerRadius: 30, style: .continuous))
             .shadow(color: .black.opacity(0.08), radius: 20, y: 8)
         }
-        .buttonStyle(.plain)
-        .sensoryFeedback(.impact(weight: .medium), trigger: animationTrigger)
+        .buttonStyle(PressableLockButtonStyle())
         .onChange(of: state) { _, newValue in
             if newValue == .unlocking { animationTrigger += 1 }
         }
@@ -326,6 +333,30 @@ private struct LockActionCard: View {
     private var title: String { switch state { case .locked: "一键开锁"; case .unlocking: "正在开锁…"; case .unlocked: "已开锁" } }
     private var subtitle: String { switch state { case .locked: "点击连接并发送开锁指令"; case .unlocking: "钥匙正在插入并转动，请稍候"; case .unlocked: "设备已收到开锁指令" } }
     private var gradient: LinearGradient { switch state { case .locked: LinearGradient(colors: [.indigo, .blue], startPoint: .topLeading, endPoint: .bottomTrailing); case .unlocking: LinearGradient(colors: [.purple, .indigo], startPoint: .topLeading, endPoint: .bottomTrailing); case .unlocked: LinearGradient(colors: [.green, .mint], startPoint: .topLeading, endPoint: .bottomTrailing) } }
+}
+
+private struct PressableLockButtonStyle: ButtonStyle {
+    @State private var didSendPressFeedback = false
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? 0.96 : 1)
+            .offset(y: configuration.isPressed ? 4 : 0)
+            .shadow(
+                color: .black.opacity(configuration.isPressed ? 0.04 : 0.08),
+                radius: configuration.isPressed ? 8 : 20,
+                y: configuration.isPressed ? 3 : 8
+            )
+            .animation(.spring(response: 0.28, dampingFraction: 0.7), value: configuration.isPressed)
+            .onChange(of: configuration.isPressed) { _, isPressed in
+                if isPressed {
+                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                    didSendPressFeedback = true
+                } else {
+                    didSendPressFeedback = false
+                }
+            }
+    }
 }
 
 private struct LockGlyph: View {
@@ -446,22 +477,130 @@ private struct ParameterMetric: View {
 }
 
 struct SettingsView: View {
-    @Bindable var store: AppStore; @Bindable var bluetooth: BluetoothManager
-    @State private var selectedDeviceID: UUID?; @State private var showingAdd = false; @State private var rebinding: DeviceProfile?; @State private var showSavePasswordAlert = false; @State private var showExporter = false; @State private var showImporter = false; @State private var exportDocument = BackupDocument(data: Data()); @State private var alert: String?; @State private var pendingBackup: BackupSnapshot?
-    var body: some View { NavigationStack { Form {
-        Section("开锁器") { ForEach(store.devices) { profile in Button { store.activeDeviceID = profile.id; selectedDeviceID = profile.id } label: { HStack { Text(profile.name); Spacer(); if profile.id == store.activeDeviceID { Image(systemName: "checkmark") } } } }.onDelete { offsets in offsets.map { store.devices[$0] }.forEach(store.remove) }; Button { showingAdd = true } label: { Label("添加开锁器", systemImage: "plus") } }
-        if let profile = store.devices.first(where: { $0.id == (selectedDeviceID ?? store.activeDeviceID) }) ?? store.activeDevice { DeviceEditor(profile: profile, store: store).id(profile.id); Section("安全") { Toggle("在 Keychain 保存密码", isOn: $store.savePasswords).onChange(of: store.savePasswords) { _, enabled in if !enabled { showSavePasswordAlert = true } } }; Section("蓝牙") { Text(profile.peripheralIdentifier == nil ? "未绑定 iOS 蓝牙设备" : "已绑定 iOS 蓝牙设备").foregroundStyle(profile.peripheralIdentifier == nil ? .orange : .secondary); Button("重新绑定蓝牙设备") { rebinding = profile } } }
-        Section("NFC 快捷指令") { Toggle("允许 NFC 自动开锁", isOn: $store.nfcAutoUnlock); if let profile = store.activeDevice { Text("快捷指令“打开 URL”中填入：\neasyopen://unlock?device=\(profile.id.uuidString)").font(.footnote).textSelection(.enabled); ShareLink(item: "easyopen://unlock?device=\(profile.id.uuidString)") { Label("分享此 URL", systemImage: "square.and.arrow.up") } } }
-        Section("连接策略") {
-            Toggle("自动连接当前设备", isOn: $store.autoConnectEnabled)
-            Stepper("RSSI 阈值 \(store.customAutoConnectRssi) dBm", value: $store.customAutoConnectRssi, in: -100...0, step: 5)
-            Text("仅在 App 活跃时持续扫描；iOS 后台连接仍受系统调度限制。").font(.caption).foregroundStyle(.secondary)
+    @Bindable var store: AppStore
+    @Bindable var bluetooth: BluetoothManager
+    @State private var showingAdd = false
+    @State private var rebinding: DeviceProfile?
+    @State private var showingImport = false
+    @State private var alert: String?
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                if let profile = store.activeDevice {
+                    Section {
+                        NavigationLink {
+                            DeviceDetailView(profileID: profile.id, store: store, bluetooth: bluetooth)
+                        } label: {
+                            CurrentDeviceCard(profile: profile, state: bluetooth.state)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    Section {
+                        NavigationLink("设备管理") {
+                            DeviceManagementView(store: store, bluetooth: bluetooth, showingAdd: $showingAdd, rebinding: $rebinding)
+                        }
+                        NavigationLink("自动化设置") {
+                            AutomationSettingsView(store: store, profile: profile, onCopy: copyURL)
+                        }
+                        NavigationLink("数据迁移") {
+                            MigrationSettingsView(showingImport: $showingImport, sharePayload: sharePayload() ?? "")
+                        }
+                        NavigationLink("安全与隐私") {
+                            SecuritySettingsView(store: store)
+                        }
+                    }
+                    Section("关于") {
+                        Text("EasyOpen").foregroundStyle(.secondary)
+                        Text("本地蓝牙开门工具").font(.caption).foregroundStyle(.secondary)
+                    }
+                } else {
+                    ContentUnavailableView("尚未添加开锁器", systemImage: "lock.slash", description: Text("请先添加设备。"))
+                }
+            }
+            .navigationTitle("设定")
+            .sheet(isPresented: $showingAdd) { AddOpenerView(store: store, bluetooth: bluetooth) }
+            .sheet(item: $rebinding) { profile in RebindDeviceView(profile: profile, store: store, bluetooth: bluetooth) }
+            .sheet(isPresented: $showingImport) { ImportView(store: store) }
+            .alert("提示", isPresented: Binding(get: { alert != nil }, set: { if !$0 { alert = nil } })) {
+                Button("好", role: .cancel) {}
+            } message: { Text(alert ?? "") }
         }
-        Section("数据迁移") { if let share = sharePayload() { ShareLink(item: share) { Label("分享全部设备配置", systemImage: "square.and.arrow.up") }; NavigationLink("显示分享二维码") { QRCodeView(payload: share).navigationTitle("分享二维码") } }; Button { prepareExport() } label: { Label("导出 Android/iOS 通用 JSON", systemImage: "doc.badge.arrow.up") }; Button { showImporter = true } label: { Label("导入 JSON 备份", systemImage: "doc.badge.arrow.down") }; Text("备份沿用 Android v1 明文 JSON 格式，包含设备参数和设置。密码会随备份导出，请仅通过可信渠道传输。").font(.caption).foregroundStyle(.secondary) }
-    }.navigationTitle("设定").sheet(isPresented: $showingAdd) { AddOpenerView(store: store, bluetooth: bluetooth) }.sheet(item: $rebinding) { profile in RebindDeviceView(profile: profile, store: store, bluetooth: bluetooth) }.alert("不再保存密码？", isPresented: $showSavePasswordAlert) { Button("继续") {}; Button("取消", role: .cancel) { store.savePasswords = true } } message: { Text("关闭后不会删除已导入的配置，但应用将无法从 Keychain 读取密码，直到重新输入并保存。") }.confirmationDialog("导入 JSON 备份？", isPresented: Binding(get: { pendingBackup != nil }, set: { if !$0 { pendingBackup = nil } }), titleVisibility: .visible) { Button("合并导入") { if let pendingBackup { do { try store.importBackup(pendingBackup); self.pendingBackup = nil } catch let caught { alert = caught.localizedDescription } } }; Button("取消", role: .cancel) { pendingBackup = nil } } message: { Text("将导入 \(pendingBackup?.devices.count ?? 0) 个开锁器，并同步 Android 的应用设置。已有同 MAC 设备会更新，iOS 蓝牙绑定会保留。") }.fileExporter(isPresented: $showExporter, document: exportDocument, contentType: .json, defaultFilename: "easyopen-backup.json") { result in if case .failure(let error) = result { alert = error.localizedDescription } }.fileImporter(isPresented: $showImporter, allowedContentTypes: [.json], allowsMultipleSelection: false) { result in handleImport(result) }.alert("数据迁移", isPresented: Binding(get: { alert != nil }, set: { if !$0 { alert = nil } })) { Button("好", role: .cancel) {} } message: { Text(alert ?? "") } } }
-    private func sharePayload() -> String? { let passwords = Dictionary(uniqueKeysWithValues: store.devices.compactMap { p in store.password(for: p).map { (p.id, $0) } }); return try? TransferCodec.encodeShare(store.devices, passwords: passwords) }
-    private func prepareExport() { do { let passwords = Dictionary(uniqueKeysWithValues: store.devices.compactMap { p in store.password(for: p).map { (p.id, $0) } }); exportDocument = BackupDocument(data: try TransferCodec.encodeBackup(devices: store.devices, passwords: passwords, activeDevice: store.activeDevice, autoUnlockOnAppOpen: store.autoUnlockOnAppOpen, autoConnectEnabled: store.autoConnectEnabled, autoConnectRange: store.autoConnectRange, customAutoConnectRssi: store.customAutoConnectRssi)); showExporter = true } catch { alert = error.localizedDescription } }
-    private func handleImport(_ result: Result<[URL], Error>) { do { guard let url = try result.get().first else { return }; let access = url.startAccessingSecurityScopedResource(); defer { if access { url.stopAccessingSecurityScopedResource() } }; guard let snapshot = TransferCodec.decodeBackup(try Data(contentsOf: url)) else { throw AppError.importFailed }; pendingBackup = snapshot } catch { alert = error.localizedDescription } }
+    }
+
+    private func sharePayload() -> String? {
+        let passwords = Dictionary(uniqueKeysWithValues: store.devices.compactMap { profile in
+            store.password(for: profile).map { (profile.id, $0) }
+        })
+        return try? TransferCodec.encodeShare(store.devices, passwords: passwords)
+    }
+
+    private func copyURL(_ url: String) {
+        UIPasteboard.general.string = url
+        alert = "已复制快捷指令 URL"
+    }
+}
+
+private struct CurrentDeviceCard: View {
+    let profile: DeviceProfile
+    let state: ConnectionState
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label("当前设备", systemImage: "lock.fill")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.secondary)
+            Text(profile.name)
+                .font(.title3.bold())
+                .foregroundStyle(.primary)
+            HStack(spacing: 8) {
+                Label(state.label, systemImage: state == .ready || state == .success ? "checkmark.circle.fill" : "circle.fill")
+                if let battery = profile.batteryLevel {
+                    Text("· \(battery.batteryLabel)")
+                }
+            }
+            .font(.subheadline.weight(.medium))
+            .foregroundStyle(state == .ready || state == .success ? .green : .secondary)
+            Text(profile.peripheralIdentifier == nil ? "未绑定蓝牙设备" : "已绑定蓝牙设备")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .padding(.vertical, 8)
+    }
+}
+
+private struct DeviceManagementView: View {
+    @Bindable var store: AppStore
+    @Bindable var bluetooth: BluetoothManager
+    @Binding var showingAdd: Bool
+    @Binding var rebinding: DeviceProfile?
+
+    var body: some View {
+        List {
+            Section("开锁器") {
+                ForEach(store.devices) { profile in
+                    Button {
+                        store.activeDeviceID = profile.id
+                    } label: {
+                        HStack {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(profile.name)
+                                Text(profile.peripheralIdentifier == nil ? "未绑定蓝牙设备" : "已绑定蓝牙设备")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            if profile.id == store.activeDeviceID { Image(systemName: "checkmark") }
+                        }
+                    }
+                    .foregroundStyle(.primary)
+                }
+                .onDelete { offsets in offsets.map { store.devices[$0] }.forEach(store.remove) }
+                Button { showingAdd = true } label: { Label("添加开锁器", systemImage: "plus") }
+            }
+        }
+        .navigationTitle("设备管理")
+    }
 }
 
 struct RebindDeviceView: View {
@@ -469,63 +608,228 @@ struct RebindDeviceView: View {
     let profile: DeviceProfile
     @Bindable var store: AppStore
     @Bindable var bluetooth: BluetoothManager
-    @State private var error: String?
+
     var body: some View {
-        NavigationStack { List {
-            Section { Text("选择与“\(profile.name)”对应的 YILA 开锁器。Android MAC 仅用于识别，iOS 会保存系统蓝牙标识。").font(.footnote).foregroundStyle(.secondary) }
-            Section("附近设备") {
-                Button("重新扫描") { bluetooth.scan() }
-                ForEach(bluetooth.discovered, id: \.identifier) { peripheral in
-                    Button { bind(peripheral) } label: {
-                        VStack(alignment: .leading) { Text(bluetooth.names[peripheral.identifier] ?? peripheral.name ?? "未命名 YILA"); Text("RSSI \(bluetooth.rssis[peripheral.identifier]?.stringValue ?? "未知") · \(peripheral.identifier.uuidString)").font(.caption2).foregroundStyle(.secondary) }
+        NavigationStack {
+            List {
+                Section {
+                    Text("选择与“\(profile.name)”对应的 YILA 开锁器。Android MAC 仅用于识别，iOS 会保存系统蓝牙标识。")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+                Section("附近设备") {
+                    Button("重新扫描") { bluetooth.scan() }
+                    ForEach(bluetooth.discovered, id: \.identifier) { peripheral in
+                        Button { bind(peripheral) } label: {
+                            VStack(alignment: .leading) {
+                                Text(bluetooth.names[peripheral.identifier] ?? peripheral.name ?? "未命名 YILA")
+                                Text("RSSI \(bluetooth.rssis[peripheral.identifier]?.stringValue ?? "未知") · \(peripheral.identifier.uuidString)")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                    if bluetooth.discovered.isEmpty {
+                        Text("点击“重新扫描”查找设备").foregroundStyle(.secondary)
                     }
                 }
-                if bluetooth.discovered.isEmpty { Text("点击“重新扫描”查找设备").foregroundStyle(.secondary) }
             }
-            if let error { Text(error).foregroundStyle(.red) }
-        }.navigationTitle("重新绑定").toolbar { ToolbarItem(placement: .cancellationAction) { Button("取消") { dismiss() } } }.onAppear { bluetooth.scan() } }
+            .navigationTitle("重新绑定")
+            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("取消") { dismiss() } } }
+            .onAppear { bluetooth.scan() }
+        }
     }
+
     private func bind(_ peripheral: CBPeripheral) {
         store.bind(profile, to: peripheral.identifier)
         dismiss()
     }
 }
 
-struct DeviceEditor: View {
+private struct DeviceDetailView: View {
+    let profileID: UUID
+    @Bindable var store: AppStore
+    @Bindable var bluetooth: BluetoothManager
+    @State private var editing: EditItem?
+    @State private var rebinding = false
+
+    private var profile: DeviceProfile { store.devices.first(where: { $0.id == profileID }) ?? store.activeDevice! }
+
+    enum EditItem: String, Identifiable {
+        case name, open, wait, close
+        var id: String { rawValue }
+    }
+
+    var body: some View {
+        Form {
+            Section("设备信息") {
+                Button { editing = .name } label: { LabeledContent("设备名称", value: profile.name) }
+                LabeledContent("蓝牙状态", value: profile.peripheralIdentifier == nil ? "未绑定" : bluetooth.state.label)
+                if let battery = profile.batteryLevel { LabeledContent("设备电量", value: battery.batteryLabel) }
+                Button("重新绑定蓝牙设备") { rebinding = true }
+            }
+            Section("开锁参数") {
+                Button {
+                    toggleDirection()
+                } label: {
+                    LabeledContent("方向", value: profile.attribute == 0 ? "正向 +" : "反向 −")
+                }
+                Button { editing = .open } label: { LabeledContent("开启", value: "\(profile.openTimeMs) ms") }
+                Button { editing = .wait } label: { LabeledContent("保持", value: "\(profile.waitTimeMs) ms") }
+                Button { editing = .close } label: { LabeledContent("关闭", value: "\(profile.closeTimeMs) ms") }
+            }
+        }
+        .navigationTitle("当前设备")
+        .sheet(item: $editing) { item in
+            EditDeviceItemSheet(item: item, profile: profile, store: store)
+                .presentationDetents([.height(item == .name ? 220 : 300)])
+        }
+        .sheet(isPresented: $rebinding) { RebindDeviceView(profile: profile, store: store, bluetooth: bluetooth) }
+    }
+
+    private func toggleDirection() {
+        var updated = profile
+        updated.attribute = updated.attribute == 0 ? 1 : 0
+        try? store.update(updated)
+        UISelectionFeedbackGenerator().selectionChanged()
+    }
+}
+
+private struct EditDeviceItemSheet: View {
+    let item: DeviceDetailView.EditItem
     let profile: DeviceProfile
     @Bindable var store: AppStore
-    @State private var name: String
-    @State private var attribute: Int
-    @State private var open: Int
-    @State private var wait: Int
-    @State private var close: Int
-    @State private var password: String
-    init(profile: DeviceProfile, store: AppStore) {
-        self.profile = profile; self.store = store
-        _name = State(initialValue: profile.name); _attribute = State(initialValue: profile.attribute)
-        _open = State(initialValue: profile.openTimeMs); _wait = State(initialValue: profile.waitTimeMs); _close = State(initialValue: profile.closeTimeMs)
-        _password = State(initialValue: store.password(for: profile) ?? "")
-    }
-    var body: some View { Section("当前设备参数") {
-        TextField("名称", text: $name)
-        SecureField("6 位数字密码", text: $password).keyboardType(.numberPad)
-        Picker("方向", selection: $attribute) { Text("正向 +").tag(0); Text("反向 -").tag(1) }
-        Stepper("开启 \(open) ms", value: $open, in: 0...60000, step: 50)
-        Stepper("保持 \(wait) ms", value: $wait, in: 0...60000, step: 50)
-        Stepper("关闭 \(close) ms", value: $close, in: 0...60000, step: 50)
-        Button("保存参数") {
-            var updated = profile; updated.name = name; updated.attribute = attribute; updated.openTimeMs = open; updated.waitTimeMs = wait; updated.closeTimeMs = close
-            try? store.update(updated, password: password.isEmpty ? nil : password)
+    @Environment(\.dismiss) private var dismiss
+    @State private var text: String
+    @State private var value: Double
+
+    private var maxDuration: Double {
+        switch item {
+        case .wait: return 10000
+        case .open, .close: return 5000
+        default: return 5000
         }
     }
-    .onChange(of: profile) { _, newProfile in
-        name = newProfile.name
-        attribute = newProfile.attribute
-        open = newProfile.openTimeMs
-        wait = newProfile.waitTimeMs
-        close = newProfile.closeTimeMs
-        password = store.password(for: newProfile) ?? ""
+
+    init(item: DeviceDetailView.EditItem, profile: DeviceProfile, store: AppStore) {
+        self.item = item; self.profile = profile; self.store = store
+        _text = State(initialValue: profile.name)
+        let initial: Int
+        switch item {
+        case .open: initial = min(5000, max(100, profile.openTimeMs))
+        case .wait: initial = min(10000, max(100, profile.waitTimeMs))
+        case .close: initial = min(5000, max(100, profile.closeTimeMs))
+        default: initial = 0
+        }
+        _value = State(initialValue: Double(initial))
     }
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 20) {
+                if item == .name {
+                    TextField("设备名称", text: $text)
+                        .textFieldStyle(.roundedBorder)
+                        .padding(.horizontal)
+                } else {
+                    Text("\(Int(value)) ms").font(.title2.bold())
+                    Slider(value: $value, in: 100...maxDuration, step: 50).padding(.horizontal)
+                    HStack {
+                        Button("−") { value = max(100, value - 50) }
+                        Spacer()
+                        Button("+") { value = min(maxDuration, value + 50) }
+                    }
+                    .font(.title2.bold())
+                    .padding(.horizontal, 40)
+                }
+                Spacer()
+            }
+            .padding(.top, 24)
+            .navigationTitle(title)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("取消") { dismiss() } }
+                ToolbarItem(placement: .confirmationAction) { Button("完成") { save(); dismiss() } }
+            }
+        }
+    }
+
+    private var title: String {
+        switch item { case .name: "修改设备名称"; case .open: "开启时长"; case .wait: "保持时长"; case .close: "关闭时长" }
+    }
+
+    private func save() {
+        var updated = profile
+        switch item {
+        case .name: updated.name = text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? profile.name : text
+        case .open: updated.openTimeMs = Int(value)
+        case .wait: updated.waitTimeMs = Int(value)
+        case .close: updated.closeTimeMs = Int(value)
+        }
+        try? store.update(updated)
+    }
+}
+
+private struct AutomationSettingsView: View {
+    @Bindable var store: AppStore
+    let profile: DeviceProfile
+    let onCopy: (String) -> Void
+
+    var body: some View {
+        Form {
+            Section("NFC 自动开锁") {
+                Toggle("允许 NFC 自动开锁", isOn: $store.nfcAutoUnlock)
+                Toggle("App 启动时自动开锁", isOn: $store.autoUnlockOnAppOpen)
+            }
+            Section("连接") {
+                Toggle("自动连接当前设备", isOn: $store.autoConnectEnabled)
+                Stepper("RSSI 阈值 \(store.customAutoConnectRssi) dBm", value: $store.customAutoConnectRssi, in: -100...0, step: 5)
+            }
+            Section("快捷指令 URL") {
+                Text("easyopen://unlock?device=\(profile.id.uuidString)")
+                    .font(.footnote)
+                    .textSelection(.enabled)
+                Button { onCopy("easyopen://unlock?device=\(profile.id.uuidString)") } label: {
+                    Label("点击复制 URL", systemImage: "doc.on.doc")
+                }
+            }
+        }
+        .navigationTitle("自动化设置")
+    }
+}
+
+private struct MigrationSettingsView: View {
+    @Binding var showingImport: Bool
+    let sharePayload: String
+
+    var body: some View {
+        List {
+            Section {
+                Button { showingImport = true } label: { Label("扫描导入", systemImage: "qrcode.viewfinder") }
+                NavigationLink { QRCodeView(payload: sharePayload).navigationTitle("设备配置二维码") } label: {
+                    Label("展示二维码导出", systemImage: "qrcode")
+                }
+            } footer: {
+                Text("二维码包含全部设备配置，请仅通过可信渠道传输。")
+            }
+        }
+        .navigationTitle("数据迁移")
+    }
+}
+
+private struct SecuritySettingsView: View {
+    @Bindable var store: AppStore
+    var body: some View {
+        Form {
+            Section("密码") {
+                Toggle("在 Keychain 保存密码", isOn: $store.savePasswords)
+            }
+            Section {
+                Text("密码只保存在本机 Keychain，不会显示在设置页面。")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .navigationTitle("安全与隐私")
     }
 }
 
@@ -537,4 +841,17 @@ struct BackupDocument: FileDocument {
     func fileWrapper(configuration: WriteConfiguration) throws -> FileWrapper { FileWrapper(regularFileWithContents: data) }
 }
 
-extension ConnectionState { var label: String { switch self { case .unavailable: "蓝牙不可用"; case .scanning: "正在扫描"; case .discovered: "已发现设备"; case .connecting: "正在连接"; case .ready: "蓝牙已就绪"; case .unlocking: "正在开锁"; case .success: "开锁成功"; case .disconnected: "未连接"; case .failure(let value): value } } }
+extension ConnectionState { var label: String { switch self { case .unavailable: "蓝牙不可用"; case .scanning: "正在扫描"; case .discovered: "已发现设备"; case .connecting: "正在连接"; case .ready: "设备已就绪"; case .unlocking: "正在开锁"; case .success: "开锁成功"; case .disconnected: "未连接"; case .failure(let value): value } } }
+
+extension Int {
+    var batteryLabel: String {
+        switch self {
+        case 1: "电量低"
+        case 2: "电量约 25%"
+        case 3: "电量约 50%"
+        case 4: "电量约 75%"
+        case 5: "电量约 100%"
+        default: "电量未知"
+        }
+    }
+}
