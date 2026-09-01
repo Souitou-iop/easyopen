@@ -263,7 +263,12 @@ struct HomeView: View {
             }
         }
         .padding(18)
-        .background(.background, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+        .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                .strokeBorder(Color.white.opacity(0.08), lineWidth: 1)
+        )
+        .shadow(color: .black.opacity(0.04), radius: 12, y: 4)
     }
 
     private var connectionMenu: some View {
@@ -314,14 +319,20 @@ private struct LockActionCard: View {
                     Circle().stroke(.white.opacity(0.25), lineWidth: 1).frame(width: 220, height: 220)
                     LockGlyph(state: state, trigger: animationTrigger)
                 }
+                .animation(.easeInOut(duration: 0.5), value: state)
                 VStack(spacing: 5) {
                     Text(title).font(.title2.bold())
                     Text(subtitle).font(.subheadline).foregroundStyle(.secondary)
                 }
+                .animation(.easeInOut(duration: 0.35), value: state)
             }
             .frame(maxWidth: .infinity)
             .padding(.vertical, 22)
-            .background(.background, in: RoundedRectangle(cornerRadius: 30, style: .continuous))
+            .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 30, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 30, style: .continuous)
+                    .strokeBorder(Color.white.opacity(0.08), lineWidth: 1)
+            )
             .shadow(color: .black.opacity(0.08), radius: 20, y: 8)
         }
         .buttonStyle(PressableLockButtonStyle())
@@ -371,6 +382,7 @@ private struct LockGlyph: View {
             Image(systemName: state == .unlocked ? "lock.open.fill" : "lock.fill")
                 .font(.system(size: 62, weight: .semibold))
                 .foregroundStyle(.white)
+                .contentTransition(.symbolEffect(.replace.downUp))
                 .symbolEffect(.bounce, value: trigger)
                 .scaleEffect(state == .unlocked ? 1.04 : 1)
                 .animation(.spring(response: 0.45, dampingFraction: 0.72), value: state)

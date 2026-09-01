@@ -1,3 +1,4 @@
+import SwiftUI
 import Observation
 import Foundation
 import CoreBluetooth
@@ -32,6 +33,7 @@ import CoreBluetooth
     private var backgroundReleaseTask: Task<Void, Never>?
     private var reconnectingForForeground = false
     private var foregroundReconnectTask: Task<Void, Never>?
+    private var relockTask: Task<Void, Never>?
 
     override init() {
         super.init()
@@ -272,6 +274,22 @@ import CoreBluetooth
         }
         try await write(try UnlockProtocol.buildOpenPacket(profile: profile, password: password), characteristic: c, notify: n)
         state = .success
+        scheduleRelockReset()
+    }
+
+    private func scheduleRelockReset() {
+        relockTask?.cancel()
+        relockTask = Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(2500))
+            guard !Task.isCancelled, self.state == .success else { return }
+            withAnimation(.spring(response: 0.5, dampingFraction: 0.78)) {
+                if self.hasUsableConnection {
+                    self.state = .ready
+                } else {
+                    self.state = .disconnected
+                }
+            }
+        }
     }
 
     private func write(_ data: Data, characteristic: CBCharacteristic, notify: CBCharacteristic) async throws {
@@ -313,6 +331,8 @@ import CoreBluetooth
     }
 
     func disconnect() {
+        relockTask?.cancel()
+        relockTask = nil
         retainConnectionInBackground = false
         backgroundReleaseTask?.cancel()
         backgroundReleaseTask = nil
